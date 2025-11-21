@@ -1,4 +1,4 @@
-# Consensus and Ledger
+# Consensus I: Node, Consensus, and Ledger Fundamentals
 
 ### Module Overview
 
