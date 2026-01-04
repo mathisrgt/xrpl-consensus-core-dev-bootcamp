@@ -39,25 +39,28 @@ The XRPL consensus protocol achieves agreement through a federated model:
           ↓               ↓               ↓
        Proposal       Proposal        Proposal
           ↓               ↓               ↓
-    ┌─────────────────────────────────────────┐
-    │         Iterative Voting Process        │
-    │                                         │
-    │  Round 1: Share initial positions       │
-    │  Round 2: Adjust based on peers         │
-    │  Round 3: Continue until supermajority  │
-    └─────────────────────────────────────────┘
+    ┌─────────────────────────────────────────────────────┐
+    │     Iterative Voting Process (Establish Phase)      │
+    │                                                     │
+    │      Iteration 1: Share initial positions           │
+    │      Iteration 2: Adjust based on peers             │
+    │      Iteration 3: Continue until supermajority      │
+    └─────────────────────────────────────────────────────┘
                          ↓
-                  Consensus Reached
+              80% agree on same transaction set
                          ↓
-                   New Ledger Created
+                  Consensus reached
+                         ↓
+                   New Ledger created
 ```
 
 **Key Principles:**
 
-1. **Trust is Configurable**: Each node chooses which validators to trust (UNL)
-2. **Iterative Convergence**: Validators adjust positions based on peer input
-3. **Supermajority Requirement**: 80%+ agreement required for finalization
-4. **Fast Finality**: Ledgers close in 3-5 seconds on average
+1. **Trust is configurable**: Each node chooses which validators to trust (Unique Node List - UNL)
+2. **Iterative convergence**: Validators adjust positions based on peer input
+3. **Avalanche voting**: Dynamic thresholds (50% → 65% → 70% → 95%) help validators converge on which transactions to include
+4. **Final consensus**: 80% of validators must agree on the complete transaction set (same hash) to declare consensus
+5. **Fast finality**: Ledgers close in 3-5 seconds on average
 
 ### The Consensus State Machine
 
@@ -141,7 +144,7 @@ XRPL consensus tolerates Byzantine (malicious or faulty) validators:
 
 ```
 For UNL of size n:
-  - Can tolerate up to ⌊(n-1)/5⌋ Byzantine validators
+  - Can tolerate up to ⌊n/5⌋ Byzantine validators (less than 20%)
   - Requires 80% honest agreement
   - Safety guaranteed with <20% Byzantine
 ```
@@ -159,18 +162,21 @@ Key parameters that control consensus behavior:
 
 ```cpp
 struct ConsensusParms {
-    // Minimum consensus percentage required
-    static constexpr int minCONSENSUS_PCT = 80;
+      // Minimum consensus percentage required
+      static constexpr int minCONSENSUS_PCT = 80;
 
-    // Minimum time before consensus can be reached
-    std::chrono::milliseconds ledgerMIN_CONSENSUS{1950};
+      // Close time consensus threshold (added)
+      static constexpr int avCT_CONSENSUS_PCT = 75;
 
-    // Maximum time before consensus times out
-    std::chrono::seconds ledgerMAX_CONSENSUS{15};
+      // Minimum time before consensus can be reached
+      std::chrono::milliseconds ledgerMIN_CONSENSUS{1950};
 
-    // Avalanche state machine thresholds
-    std::map<AvalancheState, int> avalancheCutoffs;
-};
+      // Maximum time before consensus times out
+      std::chrono::seconds ledgerMAX_CONSENSUS{15};
+
+      // Avalanche state machine thresholds
+      std::map<AvalancheState, int> avalancheCutoffs;
+  };
 ```
 
 **Parameter Impact:**
@@ -183,25 +189,31 @@ struct ConsensusParms {
 
 ### The Avalanche Mechanism
 
-XRPL uses an "avalanche" approach to accelerate convergence:
+  XRPL's avalanche mechanism uses **increasing thresholds** to force convergence on disputed transactions:
 
+  **Threshold Progression:**
 ```
-State Machine Progression:
-
-    [init] → [mid] → [late] → [stuck]
-      ↓        ↓        ↓         ↓
-    80%      70%      60%      50%
-    threshold threshold threshold threshold
+  Time:     0% ────→ 50% ────→ 85% ────→ 200%
+  State:    init     mid       late      stuck
+  Threshold: 50%     65%       70%       95%
 ```
+  **How It Works:**
 
-**Behavior:**
+  - **Early (50% threshold)**: Easy to include transactions → rapid exploration
+  - **Mid (65% threshold)**: Harder to change votes → stabilization begins
+  - **Late (70% threshold)**: Very hard to change → forced convergence
+  - **Stuck (95% threshold)**: Near-impossible to change → lock-in
 
-- **init**: Require 80% agreement (normal operation)
-- **mid**: Lower threshold if taking too long
-- **late**: Further reduce requirements
-- **stuck**: Accept lower agreement to avoid deadlock
+  **Key Point:** Thresholds **rise** over time, making it progressively harder to dissent from the majority. This creates an "avalanche effect" - once a majority position emerges, validators are forced to converge to it.
 
-This adaptive mechanism ensures progress even with network issues.
+  **Purpose:**
+  1. Prevent endless flip-flopping of votes
+  2. Force commitment to majority view
+  3. Resist Byzantine manipulation
+  4. Guarantee convergence in finite time
+
+  **Analogy:** Like a real avalanche, once momentum builds (majority emerges), the increasing thresholds make it impossible to stop the convergence toward that position.
+
 
 ### Integration with the Ledger
 
@@ -247,10 +259,10 @@ Understanding consensus fundamentals is essential because:
 
 1. **Federated Consensus**: Trust-based agreement without central authority
 2. **UNL**: Configurable set of trusted validators
-3. **Iterative Voting**: Positions converge through multiple rounds
-4. **Supermajority**: 80%+ agreement required for finalization
-5. **Avalanche**: Adaptive thresholds ensure progress
-6. **Byzantine Tolerance**: Resists malicious or faulty validators
+3. **Iterative Voting**: Validators adjust positions based on peer input
+4. **Avalanche Voting**: Rising thresholds (50%→95%) force convergence on disputed transactions
+5. **Supermajority**: 80%+ validators must agree on the complete transaction set (same hash) for finalization
+6. **Byzantine Tolerance**: Resists up to 20% malicious or faulty validators
 
 **Design Properties:**
 
