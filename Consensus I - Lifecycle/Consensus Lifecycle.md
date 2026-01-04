@@ -22,18 +22,18 @@ We follow the execution path through the actual codebase, showing how each compo
 │  NetworkOPs::beginConsensus()                                        │
 │       │                                                              │
 │       ▼                                                              │
-│  ┌─────────────────────────────────────────────────────────────┐    │
-│  │                    CONSENSUS ROUND                          │    │
-│  │                                                             │    │
-│  │   preStartRound() ──► startRound() ──► startRoundInternal() │    │
-│  │         │                                                   │    │
-│  │         ▼                                                   │    │
-│  │   ┌──────────┐    ┌────────────┐    ┌──────────┐           │    │
-│  │   │   OPEN   │───►│ ESTABLISH  │───►│ ACCEPTED │           │    │
-│  │   └──────────┘    └────────────┘    └──────────┘           │    │
-│  │         │               │                │                  │    │
-│  │     timerEntry()    timerEntry()     onAccept()            │    │
-│  └─────────────────────────────────────────────────────────────┘    │
+│  ┌─────────────────────────────────────────────────────────────┐     │
+│  │                    CONSENSUS ROUND                          │     │
+│  │                                                             │     │
+│  │   preStartRound() ──► startRound() ──► startRoundInternal() │     │
+│  │         │                                                   │     │
+│  │         ▼                                                   │     │
+│  │   ┌──────────┐    ┌────────────┐    ┌──────────┐            │     │
+│  │   │   OPEN   │───►│ ESTABLISH  │───►│ ACCEPTED │            │     │
+│  │   └──────────┘    └────────────┘    └──────────┘            │     │
+│  │         │               │                │                  │     │
+│  │     timerEntry()    timerEntry()     onAccept()             │     │
+│  └─────────────────────────────────────────────────────────────┘     │
 │       │                                                              │
 │       ▼                                                              │
 │  NetworkOPs::endConsensus()                                          │
@@ -50,10 +50,10 @@ We follow the execution path through the actual codebase, showing how each compo
 Consensus begins at application startup:
 
 ```cpp
-// Application.cpp
+// Application.cpp line 1385
 // Start first consensus round
 if (!m_networkOPs->beginConsensus(
-        m_ledgerMaster->getClosedLedger()->info().hash, {}))
+        m_ledgerMaster->getClosedLedger()->header().hash, {}))
 {
     JLOG(m_journal.fatal()) << "Unable to start consensus";
     return false;
@@ -61,6 +61,7 @@ if (!m_networkOPs->beginConsensus(
 ```
 
 **Key Actions:**
+
 - Passes the hash of the last closed ledger
 - NetworkOPs coordinates the consensus initiation
 - Failure to start consensus is fatal
@@ -75,10 +76,10 @@ Before a round begins, the system prepares:
 ┌─────────────────────────────────────────────────────────────┐
 │                   PRE-START ROUND                           │
 │                                                             │
-│   ┌──────────────┐    ┌──────────────┐    ┌─────────────┐  │
-│   │    Verify    │───►│    Clean     │───►│   Prepare   │  │
-│   │    Sync      │    │    State     │    │    Data     │  │
-│   └──────────────┘    └──────────────┘    └─────────────┘  │
+│   ┌──────────────┐    ┌──────────────┐    ┌─────────────┐   │
+│   │    Verify    │───►│    Clean     │───►│   Prepare   │   │
+│   │    Sync      │    │    State     │    │    Data     │   │
+│   └──────────────┘    └──────────────┘    └─────────────┘   │
 │                                                             │
 │   • Check node synchronization                              │
 │   • Verify ledger integrity                                 │
@@ -88,6 +89,7 @@ Before a round begins, the system prepares:
 ```
 
 **Checks Performed:**
+
 - Is the node synchronized with the network?
 - Is the previous ledger valid and complete?
 - Are all required data structures ready?
@@ -100,25 +102,26 @@ This function establishes the round parameters:
 
 ```cpp
 void startRound(
-    NetClock::time_point const& now,
-    typename Ledger_t::ID const& prevLedgerID,
-    Ledger_t prevLedger,
-    hash_set<NodeID_t> const& nowUntrusted,
-    bool proposing)
-{
-    // Initialize round parameters
-    prevLedgerID_ = prevLedgerID;
-    previousLedger_ = prevLedger;
+      NetClock::time_point const& now,
+      typename Ledger_t::ID const& prevLedgerID,
+      Ledger_t prevLedger,
+      hash_set<NodeID_t> const& nowUntrusted,
+      hash_set<NodeID_t> const& nowTrusted)
+  {
+      // Adaptor determines if we should propose
+      bool proposing = adaptor_.preStartRound(prevLedger, nowTrusted);
 
-    // Set initial mode
-    mode_ = proposing ? ConsensusMode::proposing : ConsensusMode::observing;
+      // Set initial mode
+      ConsensusMode mode = proposing ?
+          ConsensusMode::proposing : ConsensusMode::observing;
 
-    // Enter internal initialization
-    startRoundInternal(now, prevLedgerID, prevLedger, proposing);
-}
+      // Enter internal initialization
+      startRoundInternal(now, prevLedgerID, prevLedger, mode, clog);
+  }
 ```
 
 **Parameters Established:**
+
 - Previous ledger hash and object
 - Initial mode (proposing or observing)
 - Timer initialization
@@ -134,8 +137,8 @@ The ledger opens to accept transactions:
 ┌─────────────────────────────────────────────────────────────┐
 │                      OPEN PHASE                             │
 │                                                             │
-│   Incoming           ┌──────────────┐        Proposal      │
-│   Transactions ────► │ Open Ledger  │ ────► Playback       │
+│   Incoming           ┌──────────────┐       Proposal        │
+│   Transactions ────► │ Open Ledger  │ ────► Playback        │
 │                      └──────────────┘                       │
 │                             │                               │
 │                             ▼                               │
@@ -155,14 +158,46 @@ The ledger opens to accept transactions:
 
 **Key Activities:**
 
-**playbackProposals():**
-- Replays peer proposals received before round started
-- Ensures consistency with network state
-- Deduplicates and validates proposals
+  **playbackProposals():**
+
+- Replays peer proposals received for this ledger that arrived early
+- Recovers proposals from up to 10 recent proposals per peer
+- Filters by prevLedgerID to find relevant proposals
+- Allows fast catch-up when switching ledgers
+
+**Example:**
+
+```
+Node behind network (on ledger 1000, network on 1001):
+    ├─ Peer proposals for 1001 arrive → saved but ignored
+    ├─ Node finishes 1000, startRound(1001) called
+    ├─ playbackProposals() runs:
+    │  └─ Finds saved proposals for 1001
+    │  └─ Processes them immediately
+    └─ Node instantly has peer positions → faster sync!
+```
 
 **timerEntry() in open phase:**
-- Called periodically to check progress
+
+- Called periodically (~1 second via ledgerGRANULARITY)
 - Evaluates close conditions via `checkLedger()`
+- Calls `shouldCloseLedger()` to determine if ledger should close
+
+**Example:**
+
+```
+t=0s:  Open phase starts
+t=1s:  timerEntry() → shouldCloseLedger() → NO (too early)
+t=2s:  timerEntry() → shouldCloseLedger() → YES (conditions met)
+ └─ closeLedger() → phase = ESTABLISH
+```
+
+**Close conditions checked:**
+
+- Minimum time elapsed (2s)
+- Has transactions OR idle timeout
+- Not opening too fast (≥ prevRoundTime/2)
+- Enough peers have closed
 
 ### Stage 5: Close Decision
 
@@ -171,30 +206,65 @@ The ledger opens to accept transactions:
 Determines if the ledger should close:
 
 ```cpp
-bool shouldCloseLedger(
-    bool anyTransactions,
-    std::size_t previousProposers,
-    std::size_t proposersClosed,
-    std::size_t proposersValidated,
-    std::chrono::milliseconds previousTime,
-    std::chrono::milliseconds currentTime,
-    std::chrono::milliseconds openTime,
-    std::chrono::seconds idleInterval,
-    ConsensusParms const& parms,
-    beast::Journal j)
-{
-    // Evaluate multiple factors...
-}
+  // Key logic from shouldCloseLedger() in Consensus.cpp
+
+  // If majority of peers already closed, follow them
+  if ((proposersClosed + proposersValidated) > (prevProposers / 2)) {
+      JLOG(j.trace()) << "Others have closed";
+      return true;  // Close with the network
+  }
+
+  // No transactions? Only close after idle interval
+  if (!anyTransactions) {
+      return timeSincePrevClose >= idleInterval;  // Default 15s
+  }
+
+  // Enforce minimum ledger open time
+  if (openTime < parms.ledgerMIN_CLOSE) {  // 2 seconds
+      JLOG(j.debug()) << "Must wait minimum time before closing";
+      return false;
+  }
+
+  // Don't close faster than half the previous consensus time
+  // (allows slower validators to keep up)
+  if (openTime < (prevRoundTime / 2)) {
+      JLOG(j.debug()) << "Ledger has not been open long enough";
+      return false;
+  }
+
+  return true;  // All conditions met
 ```
 
-**Close Conditions:**
+**Close Decision Process:**
 
-| Factor | Condition |
-| --- | --- |
-| Time elapsed | Minimum time since last close |
-| Transactions | At least one transaction present |
-| Peer activity | Peers are closing their ledgers |
-| Idle timeout | Maximum open time reached |
+**Step 1: Safety Checks**
+
+- If timing is unusual (prevRoundTime or timeSincePrevClose out of range) → **CLOSE immediately**
+
+**Step 2: Network Coordination**
+
+- If (proposersClosed + proposersValidated) > prevProposers/2 → **CLOSE** (follow majority)
+
+**Step 3: Transaction-Based Decision**
+
+*Path A: No Transactions*
+
+- Close only if: timeSincePrevClose ≥ ledgerIDLE_INTERVAL (15s)
+- Purpose: Maintain regular ledger cadence even when idle
+
+*Path B: Has Transactions*
+
+- **Must satisfy:** openTime ≥ ledgerMIN_CLOSE (2s)
+- **Must satisfy:** openTime ≥ prevRoundTime/2
+- If both pass → **CLOSE**
+
+**Key Parameters:**
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| ledgerMIN_CLOSE | 2s | Minimum time ledger must stay open |
+| ledgerIDLE_INTERVAL | 15s | Maximum idle time before forcing close |
+| prevRoundTime/2 | Dynamic | Throttle to prevent racing ahead |
 
 ### Stage 6: Closing the Ledger
 
@@ -229,6 +299,7 @@ Transitions from open to establish phase:
 ```
 
 **Actions:**
+
 - Finalizes transaction set for the ledger
 - Creates initial consensus proposal
 - Broadcasts closure to peers
@@ -266,7 +337,7 @@ The core of consensus—exchanging proposals and resolving disputes:
 │   │       │                                               │ │
 │   │   ConsensusState?                                     │ │
 │   │       │                                               │ │
-│   │   No ─┴─► Loop back to timerEntry()                   │ │
+│   │   No  ┴─► Loop back to timerEntry()                   │ │
 │   │   Yes ──► Proceed to accept                           │ │
 │   └───────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────┘
@@ -275,63 +346,114 @@ The core of consensus—exchanging proposals and resolving disputes:
 **Key Functions:**
 
 **updateOurPositions():**
+
 - Processes peer proposals
 - Adjusts votes on disputed transactions
 - Updates local candidate transaction set
 
 **shouldPause():**
+
 - Checks if consensus should pause
 - Handles lagging or non-participating peers
 - Prevents premature advancement
 
 **haveConsensus() → checkConsensus() → checkConsensusReached():**
+
 - Evaluates if agreement threshold met
 - Considers timing constraints
 - Returns consensus state (Yes/No/MovedOn/Expired)
 
 ### Stage 8: Consensus Checking
 
-**Consensus Evaluation Logic:**
+  **Consensus Evaluation Logic:**
 
-```cpp
-ConsensusState checkConsensus(
-    std::size_t proposers,
-    std::size_t agreements,
-    std::chrono::milliseconds elapsed,
-    ConsensusParms const& parms)
-{
-    // Check minimum time elapsed
-    if (elapsed < parms.ledgerMIN_CONSENSUS)
-        return ConsensusState::No;
+  ```cpp
+  ConsensusState checkConsensus(
+      std::size_t prevProposers,
+      std::size_t currentProposers,
+      std::size_t currentAgree,
+      std::size_t currentFinished,
+      std::chrono::milliseconds previousAgreeTime,
+      std::chrono::milliseconds currentAgreeTime,
+      bool stalled,
+      ConsensusParms const& parms,
+      bool proposing)
+  {
+      // Check minimum time elapsed
+      if (currentAgreeTime <= parms.ledgerMIN_CONSENSUS)
+          return ConsensusState::No;
 
-    // Check proposer count
-    if (proposers < parms.minProposers)
-        return ConsensusState::No;
+      // Check if we have reduced participation
+      if (currentProposers < prevProposers * 3/4) {
+          if (currentAgreeTime < previousAgreeTime + parms.ledgerMIN_CONSENSUS)
+              return ConsensusState::No;
+      }
 
-    // Check agreement percentage
-    if (checkConsensusReached(proposers, agreements, parms))
-        return ConsensusState::Yes;
+      // Check if we reached 80% agreement on transaction set
+      if (checkConsensusReached(
+              currentAgree,
+              currentProposers,
+              proposing,
+              parms.minCONSENSUS_PCT,  // Always 80%
+              currentAgreeTime > parms.ledgerMAX_CONSENSUS,
+              stalled))
+          return ConsensusState::Yes;
 
-    // Check maximum time
-    if (elapsed >= parms.ledgerMAX_CONSENSUS)
-        return ConsensusState::Expired;
+      // Check if 80% of peers moved on without us
+      if (checkConsensusReached(
+              currentFinished,
+              currentProposers,
+              false,
+              parms.minCONSENSUS_PCT,  // Always 80%
+              currentAgreeTime > parms.ledgerMAX_CONSENSUS,
+              false))
+          return ConsensusState::MovedOn;
 
-    return ConsensusState::No;
-}
+      // Check if consensus has taken too long
+      // Timeout is bounded: min(max(prevTime × 10, 15s), 120s)
+      std::chrono::milliseconds const maxAgreeTime =
+          previousAgreeTime * parms.ledgerABANDON_CONSENSUS_FACTOR;  // 10
+
+      if (currentAgreeTime > std::clamp(
+                                 maxAgreeTime,
+                                 parms.ledgerMAX_CONSENSUS,      // 15s minimum
+                                 parms.ledgerABANDON_CONSENSUS)) // 120s maximum
+          return ConsensusState::Expired;
+
+      return ConsensusState::No;
+  }
 ```
 
 **Agreement Threshold:**
 
+```cpp
+    checkConsensusReached():
+      agreement_pct = (agreeing / total) * 100
 ```
-checkConsensusReached():
-    agreement_pct = (agreements / proposers) * 100
 
-    Required percentage depends on avalanche state:
-      init:  80%
-      mid:   70%
-      late:  60%
-      stuck: 50%
-```
+Required: 80% (fixed - minCONSENSUS_PCT)
+
+This checks if 80% of validators have the SAME complete transaction set (same hash).
+
+Two checks performed:
+
+1. Do 80% agree with OUR position? → Yes
+2. Did 80% move to next ledger? → MovedOn
+
+**Important Distinction:**
+
+The 80% threshold here is for final consensus (comparing complete transaction set hashes).
+
+This is separate from avalanche voting (50%→65%→70%→95%) which determines which individual transactions to include during updateOurPositions().
+
+**Consensus States:**
+
+  | State   | Meaning                   | Action                 |
+  |---------|---------------------------|------------------------|
+  | No      | Not enough agreement yet  | Continue voting        |
+  | Yes     | 80%+ agree with us        | Accept consensus!      |
+  | MovedOn | 80%+ moved to next ledger | We're behind, catch up |
+  | Expired | Took too long             | Bow out of consensus   |
 
 ### Stage 9: Acceptance
 
@@ -343,36 +465,39 @@ When consensus is reached:
 ┌─────────────────────────────────────────────────────────────┐
 │                      ON ACCEPT                              │
 │                                                             │
-│   Consensus          ┌──────────────┐       ┌───────────┐  │
-│   Result ──────────► │   buildLCL   │─────► │  Notify   │  │
-│                      └──────────────┘       │  System   │  │
-│                             │               └───────────┘  │
-│                             ▼                              │
-│                      ┌──────────────┐                      │
-│                      │ LedgerMaster │                      │
-│                      │::consensusBuilt                     │
-│                      └──────────────┘                      │
-│                             │                              │
-│                             ▼                              │
-│                      ┌──────────────┐                      │
-│                      │Apply Disputed│                      │
-│                      │ Transactions │                      │
-│                      └──────────────┘                      │
+│   Consensus          ┌──────────────┐       ┌───────────┐   │
+│   Result ──────────► │   buildLCL   │─────► │  Notify   │   │
+│                      └──────────────┘       │  System   │   │
+│                             │               └───────────┘   │
+│                             ▼                               │
+│                      ┌────────────────┐                     │
+│                      │ LedgerMaster   │                     │
+│                      │::consensusBuilt│                     │
+│                      └────────────────┘                     │
+│                             │                               │
+│                             ▼                               │
+│                      ┌──────────────┐                       │
+│                      │Apply Disputed│                       │
+│                      │ Transactions │                       │
+│                      └──────────────┘                       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 **Sub-Functions:**
 
 **buildLCL():**
+
 - Constructs Last Closed Ledger from agreed transactions
 - Applies transactions in canonical order
 - Produces validated ledger object
 
 **LedgerMaster::consensusBuilt():**
+
 - Updates system's view of current ledger
 - Triggers downstream processing
 
 **Apply Disputed Transactions:**
+
 - Attempts to apply transactions that weren't included
 - Queues for next round if applicable
 
@@ -383,6 +508,7 @@ When consensus is reached:
 Finalizes the acceptance process:
 
 ```
+
 ┌─────────────────────────────────────────────────────────────┐
 │                      DO ACCEPT                              │
 │                                                             │
@@ -395,20 +521,24 @@ Finalizes the acceptance process:
 │   ledger object        metrics, removes   ledger with      │
 │   from agreed set      included txns      local txns       │
 └─────────────────────────────────────────────────────────────┘
+
 ```
 
 **Key Actions:**
 
 **BuildLedger::buildLedger:**
+
 - Final ledger construction
 - State persistence
 
 **app_.getTxQ().processClosedLedger:**
+
 - Updates fee metrics
 - Removes included transactions
 - Manages deferred transactions
 
 **app_.openLedger().accept:**
+
 - Applies local transactions not in closed ledger
 - Prepares open ledger for next round
 
@@ -419,6 +549,7 @@ Finalizes the acceptance process:
 Completes the round and prepares for the next:
 
 ```
+
 ┌─────────────────────────────────────────────────────────────┐
 │                    END CONSENSUS                            │
 │                                                             │
@@ -426,7 +557,7 @@ Completes the round and prepares for the next:
 │       │                                                     │
 │       ├─── Match? ──► Continue normally                     │
 │       │                                                     │
-│       └─── Mismatch? ──► switchLastClosedLedger()          │
+│       └─── Mismatch? ──► switchLastClosedLedger()           │
 │                              │                              │
 │                              ├──► clearNeedNetworkLedger()  │
 │                              ├──► processClosedLedger()     │
@@ -440,6 +571,7 @@ Completes the round and prepares for the next:
 │       ▼                                                     │
 │   Prepare for next round                                    │
 └─────────────────────────────────────────────────────────────┘
+
 ```
 
 ### Stage 12: Begin Next Round
@@ -535,7 +667,7 @@ RCLConsensus::startRound();    // Initialize next round
 
 1. **Timer-driven**: Periodic events drive state transitions
 2. **Iterative**: Establish phase loops until consensus
-3. **Adaptive**: Avalanche mechanism adjusts thresholds
+3. **Convergent**: Avalanche mechanism's rising thresholds force consensus
 4. **Resilient**: Handles network issues and recovery
 5. **Continuous**: Rounds follow each other seamlessly
 
