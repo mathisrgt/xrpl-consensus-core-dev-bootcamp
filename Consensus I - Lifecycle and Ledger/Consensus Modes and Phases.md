@@ -181,13 +181,19 @@ enum class ConsensusPhase {
 ```
 
 **Close Conditions:**
-- Sufficient time elapsed since last ledger
-- At least one transaction present (or close time reached)
-- Previous ledger consensus completed
+- Minimum time elapsed: ledgerMIN_CLOSE (2s)
+- At least one transaction present OR idle timeout (ledgerIDLE_INTERVAL = 15s)
+- Not opening too fast: openTime ≥ prevRoundTime/2
+- Alternatively: >50% of validators already closed (follow network)
 
 **Key Functions:**
 - `shouldCloseLedger()`: Evaluates if closure conditions are met
 - `playbackProposals()`: Replays peer proposals for consistency
+
+**Timing:**
+- Typical duration: 2-15 seconds
+- Minimum: 2s (ledgerMIN_CLOSE)
+- Maximum idle: 15s (ledgerIDLE_INTERVAL)
 
 #### Phase: establish
 
@@ -223,6 +229,31 @@ enum class ConsensusPhase {
 - Vote on inclusion/exclusion
 - Update local position based on peer input
 - Check for consensus achievement
+
+**Timing:**
+- **Minimum duration:** ledgerMIN_CONSENSUS (1.95s) - must wait at least this long before consensus can be declared
+- **Maximum duration:** ledgerMAX_CONSENSUS (15s) - max time to pause for laggards
+- **Check interval:** ledgerGRANULARITY (1s) - how often state is checked and positions updated
+- **Abandonment:** ledgerABANDON_CONSENSUS (120s) - absolute maximum before giving up
+- **Typical duration:** 2-10 seconds in healthy network conditions
+
+**Avalanche Thresholds:**
+
+As time progresses through the establish phase, the threshold for including disputed transactions increases:
+
+| State | Time Threshold | Agreement Required | Purpose |
+|-------|----------------|-------------------|---------|
+| init | 0% of prevRoundTime | 50% | Initial voting - easy to add transactions |
+| mid | 50% of prevRoundTime | 65% | Mid-consensus - slightly harder |
+| late | 85% of prevRoundTime | 70% | Late consensus - harder still |
+| stuck | 200% of prevRoundTime | 95% | Stuck - very hard to change |
+
+The time percentage is calculated as:
+```
+convergePercent = (currentRoundTime × 100) / max(prevRoundTime, avMIN_CONSENSUS_TIME)
+```
+
+This rising threshold forces the network to converge on a stable transaction set.
 
 **Key Functions:**
 - `updateOurPositions()`: Adjusts local votes based on peer input
@@ -386,9 +417,9 @@ The `consensus_info` RPC provides real-time consensus status:
 
 | Phase | Activity | Duration |
 | --- | --- | --- |
-| open | Collect transactions | Until close conditions |
-| establish | Exchange proposals, resolve disputes | Until consensus |
-| accepted | Build ledger, prepare next round | Brief finalization |
+| open | Collect transactions | 2-15s typical (min: 2s, idle timeout: 15s) |
+| establish | Exchange proposals, resolve disputes | 2-10s typical (min: 1.95s, max: 15s) |
+| accepted | Build ledger, prepare next round | Brief finalization (no fixed duration) |
 
 **Key Takeaways:**
 

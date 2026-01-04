@@ -131,6 +131,16 @@ void startRound(
 
 **Function: Consensus::startRoundInternal → ConsensusPhase::open**
 
+**Key Timing Parameters:**
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| ledgerIDLE_INTERVAL | 15s | Max time ledger stays open with no transactions |
+| ledgerMIN_CLOSE | 2s | Minimum time ledger must stay open |
+| prevRoundTime/2 | Dynamic | Must stay open ≥ half of previous consensus time |
+| proposeFRESHNESS | 20s | How long peer proposals remain valid |
+| proposeINTERVAL | 12s | How often we must refresh our proposal |
+
 The ledger opens to accept transactions:
 
 ```
@@ -264,7 +274,7 @@ Determines if the ledger should close:
 |-----------|-------|---------|
 | ledgerMIN_CLOSE | 2s | Minimum time ledger must stay open |
 | ledgerIDLE_INTERVAL | 15s | Maximum idle time before forcing close |
-| prevRoundTime/2 | Dynamic | Throttle to prevent racing ahead |
+| prevRoundTime/2 | Dynamic | Throttle: ledger must stay open ≥ half of previous round time |
 
 ### Stage 6: Closing the Ledger
 
@@ -308,6 +318,33 @@ Transitions from open to establish phase:
 ### Stage 7: Establish Phase
 
 **Function: Consensus::phaseEstablish**
+
+**Key Timing Parameters:**
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| ledgerMIN_CONSENSUS | 1.95s | Minimum time before consensus can be declared |
+| ledgerMAX_CONSENSUS | 15s | Maximum time to wait for lagging validators |
+| ledgerABANDON_CONSENSUS | 120s | Absolute maximum round time |
+| ledgerABANDON_CONSENSUS_FACTOR | 10× | Dynamic abandonment: min(prevTime × 10, 120s) |
+| avMIN_CONSENSUS_TIME | 5s | Minimum time used for avalanche calculations |
+
+**Avalanche Threshold Progression:**
+
+```
+convergePercent = (currentRoundTime × 100) / max(prevRoundTime, avMIN_CONSENSUS_TIME)
+
+Thresholds by state:
+  init  (0% time):   50% agreement needed
+  mid   (50% time):  65% agreement needed
+  late  (85% time):  70% agreement needed
+  stuck (200% time): 95% agreement needed
+
+Example: If previous round took 4s, use avMIN_CONSENSUS_TIME (5s)
+  At 2.5s: convergePercent = (2500 × 100) / 5000 = 50%
+  → Transition from 'init' to 'mid'
+  → Threshold increases from 50% to 65%
+```
 
 The core of consensus—exchanging proposals and resolving disputes:
 
