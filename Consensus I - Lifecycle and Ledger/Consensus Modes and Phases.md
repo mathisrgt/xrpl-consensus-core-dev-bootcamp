@@ -171,7 +171,7 @@ enum class ConsensusPhase {
 ┌─────────────────────────────────────────────────────────┐
 │                    OPEN PHASE                           │
 │                                                         │
-│   Transactions   ──►  Open Ledger  ──►  Candidate Set  │
+│   Transactions   ──►  Open Ledger  ──►  Candidate Set   │
 │                                                         │
 │   • Accepting new transactions from clients             │
 │   • Building initial transaction set                    │
@@ -181,19 +181,69 @@ enum class ConsensusPhase {
 ```
 
 **Close Conditions:**
-- Minimum time elapsed: ledgerMIN_CLOSE (2s)
-- At least one transaction present OR idle timeout (ledgerIDLE_INTERVAL = 15s)
-- Not opening too fast: openTime ≥ prevRoundTime/2
-- Alternatively: >50% of validators already closed (follow network)
+
+The open phase continues until specific conditions signal it's time to close the ledger and begin consensus. Multiple conditions are evaluated:
+
+**1. Minimum Time Requirement (ledgerMIN_CLOSE = 2s)**
+- The ledger must remain open for at least 2 seconds
+- This ensures there's sufficient time for transaction propagation across the network
+- Prevents ledgers from closing too rapidly, which could exclude valid transactions
+- Even if all other conditions are met, the system waits for this minimum duration
+
+**2. Transaction Activity or Idle Timeout**
+- **With Transactions:** If at least one transaction is present in the open ledger, closure can proceed after minimum time
+- **Without Transactions:** If no transactions arrive, the ledger waits up to 15 seconds (ledgerIDLE_INTERVAL) before closing
+- This dual approach balances responsiveness (closing when there's work) with liveness (preventing indefinite waiting)
+- The idle timeout ensures the network continues to produce ledgers even during periods of low activity
+
+**3. Speed Limiting (openTime ≥ prevRoundTime/2)**
+- The current ledger must stay open for at least half the duration of the previous consensus round
+- This prevents the network from accelerating too quickly
+- Allows slower validators time to participate and stay synchronized
+- Example: If the previous round took 6 seconds, the current ledger must stay open for at least 3 seconds
+
+**4. Network Coordination (>50% validators closed)**
+- Alternatively, if more than half of the trusted validators have already closed their ledgers
+- The local node will also close to maintain synchronization with the network majority
+- This "follow the network" behavior prevents nodes from falling behind
+- Helps the network reach consensus even if individual timing conditions vary
 
 **Key Functions:**
-- `shouldCloseLedger()`: Evaluates if closure conditions are met
-- `playbackProposals()`: Replays peer proposals for consistency
 
-**Timing:**
-- Typical duration: 2-15 seconds
-- Minimum: 2s (ledgerMIN_CLOSE)
-- Maximum idle: 15s (ledgerIDLE_INTERVAL)
+**`playbackProposals()`**
+- **Called at the start of the open phase** when beginning a new consensus round
+- Handles proposals that arrived early (for future ledgers) before the node was ready
+- When the node advances to a new ledger, it replays stored proposals that are now relevant
+- Ensures consistency by processing proposals in the correct ledger context
+- Prevents loss of consensus information due to timing variations between nodes
+- Example: If peer proposals for ledger N+1 arrived while still working on ledger N, they are stored and replayed when entering the open phase for N+1
+
+**`shouldCloseLedger()`**
+- **Called repeatedly during the open phase** to check if it's time to close
+- Central decision function that evaluates all closure conditions
+- Located in `rippled/src/xrpld/consensus/Consensus.cpp`
+- Takes parameters including transaction count, proposer states, and timing information
+- Returns `true` when conditions are met, triggering the transition to establish phase
+- Implements the logic for all four conditions described above
+
+**Timing Characteristics:**
+
+The open phase duration varies based on network conditions:
+
+**Typical Duration: 2-15 seconds**
+- In normal operation with steady transaction flow: 2-5 seconds
+- During low activity periods: can extend to the full 15-second idle timeout
+- The actual duration depends on transaction arrival patterns and network consensus
+
+**Minimum Duration: 2 seconds (ledgerMIN_CLOSE)**
+- Absolute floor for any ledger's open phase
+- Cannot be shortened regardless of other conditions
+- Ensures network-wide coordination time
+
+**Maximum Idle Duration: 15 seconds (ledgerIDLE_INTERVAL)**
+- When no transactions are present, the ledger will close after this timeout
+- Prevents the network from stalling during quiet periods
+- Guarantees regular ledger progression for time-sensitive operations
 
 #### Phase: establish
 
@@ -203,10 +253,10 @@ enum class ConsensusPhase {
 ┌─────────────────────────────────────────────────────────┐
 │                  ESTABLISH PHASE                        │
 │                                                         │
-│     ┌─────────┐        ┌─────────┐        ┌─────────┐  │
-│     │ Node A  │◄──────►│ Node B  │◄──────►│ Node C  │  │
-│     │Proposal │        │Proposal │        │Proposal │  │
-│     └─────────┘        └─────────┘        └─────────┘  │
+│     ┌─────────┐        ┌─────────┐        ┌─────────┐   │
+│     │ Node A  │◄──────►│ Node B  │◄──────►│ Node C  │   │
+│     │Proposal │        │Proposal │        │Proposal │   │
+│     └─────────┘        └─────────┘        └─────────┘   │
 │           │                 │                  │        │
 │           └─────────────────┼──────────────────┘        │
 │                             ▼                           │
@@ -253,6 +303,25 @@ The time percentage is calculated as:
 convergePercent = (currentRoundTime × 100) / max(prevRoundTime, avMIN_CONSENSUS_TIME)
 ```
 
+**```currentRoundTime```**
+- How long the current consensus round has been running (in milliseconds)
+- Starts at 0 when entering establish phase
+- Increases continuously as the round progresses
+
+**```prevRoundTime```**
+- How long the previous consensus round took to complete
+- Used as the baseline for "expected" duration
+- Assumption: current round should take similar time
+
+**```avMIN_CONSENSUS_TIME```**
+- Minimum consensus time = 5 seconds (from ConsensusParms.h)
+- Safety floor to prevent using very short previous rounds as baseline
+- Ensures all avalanche states have time to activate
+
+**```max(prevRoundTime, avMIN_CONSENSUS_TIME)```**
+  - Use whichever is larger: previous round time OR 5 seconds
+  - Prevents baseline from being too short
+
 This rising threshold forces the network to converge on a stable transaction set.
 
 **Key Functions:**
@@ -268,7 +337,7 @@ This rising threshold forces the network to converge on a stable transaction set
 ┌─────────────────────────────────────────────────────────┐
 │                   ACCEPTED PHASE                        │
 │                                                         │
-│   Agreed Set  ──►  Build LCL  ──►  Notify System       │
+│   Agreed Set  ──►  Build LCL  ──►  Notify System        │
 │                                                         │
 │   • Consensus achieved (or timeout)                     │
 │   • Building Last Closed Ledger                         │
@@ -295,9 +364,9 @@ This rising threshold forces the network to converge on a stable transaction set
        ┌───────────►│     OPEN      │
        │            └───────┬───────┘
        │                    │
-       │           Close    │  shouldCloseLedger()
-       │           conditions│  returns true
-       │           met      │
+       │         Close      │  shouldCloseLedger()
+       │         conditions │  returns true
+       │         met        │
        │                    ▼
        │            ┌───────────────┐
        │            │   ESTABLISH   │◄─────┐
@@ -306,8 +375,8 @@ This rising threshold forces the network to converge on a stable transaction set
        │                    │   Update     │ No consensus yet
        │                    │   positions  │ (loop back)
        │                    │              │
-       │           Consensus▼              │
-       │           reached  ├──────────────┘
+       │          Consensus ▼              │
+       │          reached   ├──────────────┘
        │                    │
        │                    ▼
        │            ┌───────────────┐
@@ -320,30 +389,65 @@ This rising threshold forces the network to converge on a stable transaction set
 
 ### Timer-Driven Progression
 
-The consensus process is driven by periodic timer events:
+The consensus process is driven by periodic timer events through the `timerEntry()` function.
+
+**Location:** `rippled/src/xrpld/consensus/Consensus.h:840-869`
+
+**Actual Implementation:**
 
 ```cpp
-void Consensus::timerEntry() {
-    // Check current phase and take appropriate action
-    switch (phase_) {
-        case ConsensusPhase::open:
-            phaseOpen();
-            break;
-        case ConsensusPhase::establish:
-            phaseEstablish();
-            break;
-        case ConsensusPhase::accepted:
-            // Prepare for next round
-            break;
-    }
+void Consensus<Adaptor>::timerEntry(
+    NetClock::time_point const& now,
+    std::unique_ptr<std::stringstream> const& clog)
+{
+    // Nothing to do if we are currently working on a ledger
+    if (phase_ == ConsensusPhase::accepted)
+        return;
+
+    now_ = now;  // Update network-adjusted time
+
+    // Check we are on the proper ledger (this may change phase_)
+    auto const phaseOrig = phase_;
+    checkLedger(clog);
+
+    // If checkLedger changed our phase, return
+    if (phaseOrig != phase_)
+        return;
+
+    // Execute phase-specific logic
+    if (phase_ == ConsensusPhase::open)
+        phaseOpen(clog);
+    else if (phase_ == ConsensusPhase::establish)
+        phaseEstablish(clog);
 }
 ```
 
+**Key Steps:**
+
+1. **Early Exit for Accepted Phase**
+   - If already in accepted phase, nothing to do
+   - Prevents unnecessary processing while building the ledger
+
+2. **Update Network Time**
+   - Sets `now_` to the current network-adjusted time
+   - Ensures all timing calculations use consistent time
+
+3. **Ledger Verification (`checkLedger()`)**
+   - Verifies we're working on the correct ledger
+   - May detect we're on the wrong ledger and switch to `wrongLedger` mode
+   - Can change the phase if ledger issues are detected
+   - If phase changed, exit early to handle the new phase next timer tick
+
+4. **Phase-Specific Processing**
+   - **Open Phase:** Calls `phaseOpen()` to check if ledger should close
+   - **Establish Phase:** Calls `phaseEstablish()` to process consensus round
+
 **Timer Responsibilities:**
-- Advance phase when conditions met
-- Check for ledger issues (`checkLedger()`)
-- Update proposal positions
-- Detect stalls or timeouts
+- Called periodically (every `ledgerGRANULARITY` = 1 second)
+- Advances phase when conditions met
+- Detects and handles ledger synchronization issues
+- Updates proposal positions during establish phase
+- Checks for consensus achievement or timeouts
 
 ### Consensus State Outcomes
 
@@ -423,10 +527,10 @@ The `consensus_info` RPC provides real-time consensus status:
 
 **Key Takeaways:**
 
-1. **Mode reflects node's network relationship**
-2. **Phase reflects progress within a round**
-3. **Timer events drive state transitions**
-4. **States are observable via RPC**
-5. **Recovery mechanisms handle edge cases**
+1. Mode reflects node's network relationship
+2. Phase reflects progress within a round
+3. Timer events drive state transitions
+4. States are observable via RPC
+5. Recovery mechanisms handle edge cases
 
 In the next chapter, we'll trace through the complete consensus lifecycle from round initiation to ledger acceptance.
