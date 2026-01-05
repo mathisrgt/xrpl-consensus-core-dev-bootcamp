@@ -126,8 +126,8 @@ public:
 │   ┌─────────────────────────────────────────────────────┐   │
 │   │            InboundLedgersImp                        │   │
 │   │                                                     │   │
-│   │   mLedgers: map<hash, InboundLedger>               │   │
-│   │   mRecentFailures: map<hash, failure_info>         │   │
+│   │   mLedgers: map<hash, InboundLedger>                │   │
+│   │   mRecentFailures: map<hash, failure_info>          │   │
 │   │   mStash: pending data cache                        │   │
 │   └─────────────────────────────────────────────────────┘   │
 │                           │                                 │

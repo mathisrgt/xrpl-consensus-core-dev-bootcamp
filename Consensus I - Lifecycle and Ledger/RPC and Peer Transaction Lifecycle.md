@@ -32,7 +32,7 @@ This chapter traces the complete journey of a transaction from submission to inc
 │                       │                                     │
 │                       ▼                                     │
 │            ┌─────────────────────┐                          │
-│            │  NetworkOPsImp::    │                          │
+│            │  NetworkOPs::       │                          │
 │            │  processTransaction │                          │
 │            └─────────────────────┘                          │
 └─────────────────────────────────────────────────────────────┘
@@ -65,13 +65,13 @@ This chapter traces the complete journey of a transaction from submission to inc
 │                                                             │
 │   Step 2: NetworkOPs Processing                             │
 │   ─────────────────────────────                             │
-│   NetworkOPsImp::processTransaction()                       │
+│   NetworkOPs::processTransaction()                          │
 │       │                                                     │
 │       └── Queue for batch processing                        │
 │                                                             │
 │   Step 3: Batch Processing                                  │
 │   ───────────────────────                                   │
-│   NetworkOPsImp::transactionBatch()                         │
+│   NetworkOPs::transactionBatch()                            │
 │       │                                                     │
 │       └── Process queued transactions                       │
 └─────────────────────────────────────────────────────────────┘
@@ -106,7 +106,7 @@ This chapter traces the complete journey of a transaction from submission to inc
 │                                                             │
 │   Step 3: NetworkOPs Processing                             │
 │   ─────────────────────────────                             │
-│   NetworkOPsImp::processTransaction()                       │
+│   NetworkOPs::processTransaction()                          │
 │       │                                                     │
 │       └── Continue to common processing path                │
 └─────────────────────────────────────────────────────────────┘
@@ -120,7 +120,7 @@ This chapter traces the complete journey of a transaction from submission to inc
 ┌─────────────────────────────────────────────────────────────┐
 │             COMMON PROCESSING PATH                          │
 │                                                             │
-│   NetworkOPsImp::processTransaction()                       │
+│   NetworkOPs::processTransaction()                          │
 │       │                                                     │
 │       ▼                                                     │
 │   doTransactionSync()                                       │
@@ -129,7 +129,7 @@ This chapter traces the complete journey of a transaction from submission to inc
 │   doTransactionSyncBatch()                                  │
 │       │                                                     │
 │       ▼                                                     │
-│   NetworkOPsImp::apply()                                    │
+│   NetworkOPs::apply()                                       │
 │       │                                                     │
 │       ▼                                                     │
 │   ┌─────────────────────────────────────────────────────┐   │
@@ -295,7 +295,7 @@ This chapter traces the complete journey of a transaction from submission to inc
 │      └── Format and signature checks                        │
 │                                                             │
 │   4. PROCESSING                                             │
-│      └── NetworkOPsImp::processTransaction()                │
+│      └── NetworkOPs::processTransaction()                   │
 │                                                             │
 │   5. QUEUE                                                  │
 │      └── TxQ evaluates fee and sequence                     │
@@ -438,7 +438,7 @@ This chapter traces the complete journey of a transaction from submission to inc
 
 1. **Entry**: doSubmit / PeerImp::onMessage
 2. **Validation**: checkTransaction
-3. **Processing**: NetworkOPsImp::processTransaction
+3. **Processing**: NetworkOPs::processTransaction
 4. **Queue**: TxQ::apply
 5. **Application**: preflight → preclaim → doApply
 6. **Relay**: overlay().relay()
@@ -462,5 +462,17 @@ This chapter traces the complete journey of a transaction from submission to inc
 - Sequence-ordered processing
 - Efficient network propagation
 - Clear result codes for debugging
+
+**Source Code References:**
+
+- [Submit.cpp](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/rpc/handlers/Submit.cpp) - RPC submit handler (doSubmit)
+- [NetworkOPs.h](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/app/misc/NetworkOPs.h) - NetworkOPs interface
+- [NetworkOPs.cpp](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/app/misc/NetworkOPs.cpp) - NetworkOPs implementation
+- [PeerImp.h](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/overlay/detail/PeerImp.h) - Peer implementation header
+- [PeerImp.cpp](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/overlay/detail/PeerImp.cpp) - Peer message handling
+- [TxQ.h](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/app/misc/TxQ.h) - Transaction queue
+- [applySteps.h](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/app/tx/applySteps.h) - Transaction apply phases
+- [Overlay.h](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/overlay/Overlay.h) - Network overlay and relay
+- [TER.h](https://github.com/XRPLF/rippled/blob/develop/include/xrpl/protocol/TER.h) - Transaction result codes
 
 This completes our exploration of the consensus and ledger architecture module.
