@@ -28,7 +28,7 @@ The LedgerMaster is the central coordinator for ledger state management:
 │                                                             │
 │   ┌─────────────────────────────────────────────────────┐   │
 │   │                 Key Functions                       │   │
-│   │                                                     │
+│   │                                                     │   │
 │   │   doAdvance()       - Advance ledger state          │   │
 │   │   fetchForHistory() - Acquire missing ledgers       │   │
 │   │   checkAccept()     - Validate new ledger           │   │
@@ -46,13 +46,13 @@ The LedgerMaster is the central coordinator for ledger state management:
 │                                                             │
 │   Timeline:                                                 │
 │                                                             │
-│   ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────────┐   │
-│   │Published│→ │Validated│→ │ Closed  │→ │  Current    │   │
-│   │ Ledger  │  │ Ledger  │  │ Ledger  │  │  (Open)     │   │
-│   └─────────┘  └─────────┘  └─────────┘  └─────────────┘   │
-│       ↑            ↑            ↑             ↑            │
-│   Streamed to  Network has   Consensus    Accepting       │
-│   clients      validated     completed    new txns        │
+│   ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────────┐    │
+│   │Published│→ │Validated│→ │ Closed  │→ │  Current    │    │
+│   │ Ledger  │  │ Ledger  │  │ Ledger  │  │  (Open)     │    │
+│   └─────────┘  └─────────┘  └─────────┘  └─────────────┘    │
+│       ↑            ↑            ↑             ↑             │
+│   Streamed to  Network has   Consensus    Accepting         │
+│   clients      validated     completed    new txns          │
 │                                                             │
 │   Published ≤ Validated ≤ Closed ≤ Current                  │
 └─────────────────────────────────────────────────────────────┘

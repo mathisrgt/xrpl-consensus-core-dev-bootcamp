@@ -21,14 +21,14 @@ Genesis Ledger → Ledger 1 → Ledger 2 → ... → Current Ledger
                    Cryptographic Links
 ```
 
-**Chain Properties:**
+**Properties:**
 
 | Property | Description |
 | --- | --- |
-| Cryptographic Linking | Each ledger references its predecessor via hash |
-| Monotonic Sequence | Ledger numbers always increase |
-| Temporal Ordering | Represents time progression in the network |
-| State Evolution | Each ledger is a state transition from the previous |
+| **Cryptographic linking** | Each ledger references its predecessor via hash |
+| **Monotonic sequence** | Ledger numbers always increase |
+| **Temporal ordering** | Represents time progression in the network |
+| **State evolution** | Each ledger is a state transition from the previous |
 
 **Why Sequential Design?**
 
@@ -88,10 +88,10 @@ The state and transaction data are organized as Merkle trees, enabling efficient
 
 | Benefit | Description |
 | --- | --- |
-| Compact Verification | Verify specific data without downloading entire ledger |
-| Tamper Detection | Any change in data changes the root hash |
-| Parallel Processing | Different branches can be processed independently |
-| Bandwidth Optimization | Only transmit changed portions |
+| Compact verification | Verify specific data without downloading entire ledger |
+| Tamper detection | Any change in data changes the root hash |
+| Parallel processing | Different branches can be processed independently |
+| Bandwidth optimization | Only transmit changed portions |
 
 **Practical Application:**
 
@@ -122,6 +122,76 @@ A node can verify that a specific account balance is correct by checking only th
 │   SHA-256 ensures data integrity                            │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+
+#### Layer 1: Cryptographic Hashing
+
+**Uses SHA-512Half to create unique fingerprints.** Each ledger contains two Merkle trees:
+- **Transaction Map (`txMap_`)**: All transactions
+- **State Map (`stateMap_`)**: All account states and objects
+
+Hash calculation proceeds bottom-up: leaf nodes hash their data, inner nodes hash their children, producing a root hash.
+
+The ledger header stores both root hashes and calculates the final ledger hash:
+```cpp
+header_.txHash = txMap_.getHash();
+header_.accountHash = stateMap_.getHash();
+header_.hash = calculateLedgerHash(header_);
+```
+
+**Key verification points:** When building a new ledger, hashes are computed FROM data (Ledger.cpp:327-332). When loading from database, the system verifies expected roots exist via `fetchRoot()` (Ledger.cpp:228-242). Network-acquired ledgers compare received vs expected hash (InboundLedger.cpp:811-819).
+
+**Failures detected:** Missing nodes → network fetch. Hash mismatch → reject ledger. Internal corruption → abort via `invariants()` check.
+
+---
+
+#### Layer 2: Digital Signatures
+
+**Proves authorization using ed25519/secp256k1 signatures.**
+
+**Transaction signatures:** Every transaction must be signed by the account holder's private key. Invalid signatures result in `tefBAD_AUTH` rejection.
+
+**Validator signatures:** Validators sign proposals during consensus (`RCLCxPeerPos`) and validations after building a ledger (`STValidation`). Each validation includes ledger hash, sequence, consensus hash, close time, and signature timestamp to prevent replay attacks.
+
+**Key management:** Validators use a two-tier system—a master key (offline, long-term identity) and ephemeral keys (online, rotated regularly). The master key signs tokens authorizing ephemeral keys; each new token invalidates previous ones (see Exercise 1: Validator Keys Setup).
+
+**Failures:** Invalid signatures → transaction/validation rejected. Revoked keys → all validations ignored. Unknown validators → not counted toward quorum.
+
+---
+
+#### Layer 3: Consensus Validation
+
+**Provides Byzantine fault tolerance through validator quorum.**
+
+A ledger requires validations from `floor(trusted_validators × 0.8) + 1` validators, tolerating up to 20% Byzantine failures.
+
+**Process:** Collect validations for the ledger hash, filter out validators on the Negative UNL (unreliable nodes), check if quorum is met, and verify all validators agree on the same hash (LedgerMaster.cpp:932-942).
+
+**Byzantine detection:** If a node builds a different ledger than the network majority, it enters `wrongLedger` mode (Consensus.h:1093), stops proposing, acquires the majority ledger from the network, and resumes consensus.
+
+**Failures:** Insufficient validations → ledger remains unvalidated. Hash disagreement → enter `wrongLedger` mode. Network partition → wait for reconnection. The 80% quorum ensures agreement even with 20% compromised validators.
+
+---
+
+#### Layer 4: Chain Validation
+
+**Ensures temporal consistency through parent-child relationships.**
+
+Every ledger header references its predecessor (`parentHash`) and increments the sequence number (`seq = parent.seq + 1`). The system verifies: (1) parent exists, (2) parent hash matches, (3) sequence is continuous (LedgerMaster::checkAccept() line 922).
+
+**Skip list:** Maintains references at exponential distances (parent, grandparent, great-grandparent) for efficient historical lookups via `Ledger::updateSkipList()`.
+
+**Failures:** Parent hash mismatch → reject ledger. Missing parent → fetch from network. Sequence gap → fetch missing ledgers. Chain fork → `fixMismatch()` repairs (LedgerMaster.cpp:841).
+
+**Protection:** Guarantees unbroken sequence from genesis; altering past ledgers breaks the chain and is immediately detectable.
+
+---
+
+#### How Layers Work Together
+
+All four layers work sequentially during validation: **Layer 1** computes cryptographic hashes, **Layer 2** verifies signatures, **Layer 3** ensures validator agreement, and **Layer 4** confirms chain continuity. If ANY layer fails, the ledger is rejected. This defense-in-depth design means even if one layer is compromised (e.g., a stolen validator key), the other layers protect the system.
+
+---
 
 ### The Ledger Lifecycle
 

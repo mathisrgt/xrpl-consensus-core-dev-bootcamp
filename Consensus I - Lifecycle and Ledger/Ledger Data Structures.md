@@ -1,6 +1,6 @@
 # Ledger Data Structures
 
-[← Back to Consensus and Ledger Architecture](https://docs.xrpl-commons.org/core-dev-bootcamp/module08)
+[← Back to Consensus I - Lifecycle and Ledger](./)
 
 ***
 
@@ -8,31 +8,56 @@
 
 The XRP Ledger's reliability and performance depend on carefully designed data structures. This chapter explores the core classes that represent ledgers, manage their lifecycle, and provide efficient access to historical data.
 
-Understanding these structures is essential for working with the codebase, debugging issues, and implementing new features.
+The XRPL ledger is the authoritative record of the network's state at a given point in time. It contains all account balances, offers, escrows, and other objects, as well as a record of all transactions included in that ledger.
+
+Every server always has an open ledger. All received new transactions are applied to the open ledger. The open ledger can't close until consensus is reached on the previous ledger and either there is at least one transaction or the ledger's close time has been reached.
+
+Understanding these structures is essential for:
+- Working with the codebase effectively
+- Debugging ledger-related issues
+- Implementing new features that interact with ledger state
+- Understanding how consensus and validation work
 
 ### The Ledger Class
 
-The `Ledger` class is the primary representation of a single ledger instance:
+The `Ledger` class is the primary representation of a single ledger instance. It manages both the state (account balances, offers, escrows, etc.) and transaction data for a specific ledger.
+
+**Location:** [LedgerHeader.h](https://github.com/XRPLF/rippled/blob/develop/include/xrpl/protocol/LedgerHeader.h), [Ledger.cpp](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/app/ledger/Ledger.cpp)
 
 ```cpp
-// Ledger.h
-class Ledger {
-    // Metadata about the ledger
-    LedgerInfo info_;
+// Ledger.h (actual source code)
+class Ledger final : public std::enable_shared_from_this<Ledger>,
+                     public DigestAwareReadView,
+                     public TxsRawView
+{
+private:
+    // Ledger metadata (sequence, hashes, close time, etc.)
+    LedgerHeader header_;
 
-    // State tree (all account states)
-    SHAMap stateMap_;
+    // State tree (all account states, trust lines, offers, escrows, etc.)
+    SHAMap mutable stateMap_;
 
-    // Transaction tree
-    SHAMap txMap_;
+    // Transaction tree (all transactions and their metadata)
+    SHAMap mutable txMap_;
 
-    // Immutability flag
+    // Immutability flag - once true, ledger cannot be modified
     bool mImmutable;
 
-    // Protocol rules and amendments
+    // Protocol rules and enabled amendments for this ledger
     Rules rules_;
+
+    // Fee schedule for this ledger
+    Fees fees_;
+
+    // ... additional private members ...
 };
 ```
+
+**Key Points:**
+
+- **Immutability**: Once `mImmutable` is set to `true` via `setImmutable()`, the ledger cannot be modified. Only immutable ledgers can be stored in a `LedgerHolder` or published to the network.
+- **SHAMaps**: Both `stateMap_` and `txMap_` are Merkle trees. The root hash of each tree is stored in `header_.accountHash` and `header_.txHash` respectively.
+- **Rules**: The `rules_` object determines which amendments are active, affecting how transactions are processed.
 
 **Core Components:**
 
@@ -41,35 +66,41 @@ class Ledger {
 │                     LEDGER CLASS                            │
 │                                                             │
 │   ┌─────────────────────────────────────────────────────┐   │
-│   │                   LedgerInfo                        │   │
+│   │                 LedgerHeader                        │   │
 │   │   seq, hash, parentHash, accountHash, txHash,       │   │
 │   │   closeTime, closeTimeResolution, closeFlags, ...   │   │
+│   │   drops (total XRP in existence)                    │   │
 │   └─────────────────────────────────────────────────────┘   │
-│                                                             │
-│   ┌──────────────────────┐    ┌──────────────────────┐      │
-│   │      stateMap_       │    │       txMap_         │      │
-│   │                      │    │                      │      │
-│   │   Account states     │    │   Transactions       │      │
-│   │   Trust lines        │    │   + metadata         │      │
-│   │   Offers             │    │                      │      │
-│   │   Escrows            │    │                      │      │
-│   │   ...                │    │                      │      │
-│   └──────────────────────┘    └──────────────────────┘      │
+│                           │                                 │
+│            ┌──────────────┴──────────────┐                  │
+│            ▼                             ▼                  │
+│   ┌────────────────────┐    ┌────────────────────────┐      │
+│   │  stateMap_ (SHAMap)│    │   txMap_ (SHAMap)      │      │
+│   │                    │    │                        │      │
+│   │ • Account roots    │    │ • Transactions         │      │
+│   │ • Trust lines      │    │ • Transaction metadata │      │
+│   │ • Offers           │    │   (results, effects)   │      │
+│   │ • Escrows          │    │                        │      │
+│   │ • AMM, Payment Ch  │    │                        │      │
+│   │ • ...all objects   │    │                        │      │
+│   └────────────────────┘    └────────────────────────┘      │
 │                                                             │
 │   ┌─────────────────────────────────────────────────────┐   │
-│   │                     Rules                           │   │
-│   │   Active amendments, protocol version               │   │
+│   │                   Rules & Fees                      │   │
+│   │   rules_: Active amendments and protocol rules      │   │
+│   │   fees_: Base fee, reserve requirements             │   │
 │   └─────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ### Construction Methods
 
-Ledgers can be created in several ways:
+Ledgers can be created in several ways, depending on the source of data:
 
 **1. Genesis Ledger:**
 
 ```cpp
+// Ledger.cpp - Constructor signature
 Ledger::Ledger(
     create_genesis_t,
     Config const& config,
@@ -84,9 +115,12 @@ Ledger::Ledger(
 }
 ```
 
+Used to create the very first ledger in a new network.
+
 **2. From Previous Ledger:**
 
 ```cpp
+// Ledger.cpp - Constructor signature
 Ledger::Ledger(
     Ledger const& prevLedger,
     NetClock::time_point closeTime)
@@ -99,11 +133,14 @@ Ledger::Ledger(
 }
 ```
 
+This is the most common constructor used during consensus to build the next ledger.
+
 **3. From Serialized Data:**
 
 ```cpp
+// Ledger.cpp - Constructor signature
 Ledger::Ledger(
-    LedgerInfo const& info,
+    LedgerHeader const& info,
     Config const& config,
     Family& family)
 {
@@ -113,38 +150,66 @@ Ledger::Ledger(
 }
 ```
 
-### LedgerInfo Structure
+Used when loading historical ledgers from the database or acquiring them from peers.
 
-The header contains essential metadata:
+### LedgerHeader Structure
+
+The `LedgerHeader` struct contains all the metadata that uniquely identifies a ledger and its state. **This is the data that hashes to the ledger's hash.**
+
+**Location:** [LedgerHeader.h](https://github.com/XRPLF/rippled/blob/develop/include/xrpl/protocol/LedgerHeader.h)
 
 ```cpp
-struct LedgerInfo {
-    // Ledger identification
-    LedgerIndex seq;          // Sequence number
-    uint256 hash;             // This ledger's hash
-    uint256 parentHash;       // Previous ledger's hash
+// LedgerHeader.h (actual source code)
+struct LedgerHeader
+{
+    //
+    // For all ledgers
+    //
+    LedgerIndex seq = 0;                              // Sequence number
+    NetClock::time_point parentCloseTime = {};         // When parent closed
 
-    // Tree roots
-    uint256 accountHash;      // State tree root
-    uint256 txHash;           // Transaction tree root
+    //
+    // For closed ledgers
+    //
+    uint256 hash = beast::zero;                        // This ledger's hash
+    uint256 txHash = beast::zero;                      // Transaction tree root
+    uint256 accountHash = beast::zero;                 // State tree root
+    uint256 parentHash = beast::zero;                  // Previous ledger's hash
 
-    // Timing
-    NetClock::time_point closeTime;
-    NetClock::time_point parentCloseTime;
-    NetClock::duration closeTimeResolution;
-    int closeFlags;
+    XRPAmount drops = beast::zero;                     // Total XRP in existence
 
-    // Network state
-    XRPAmount drops;          // Total XRP in existence
+    bool mutable validated = false;                    // Has been validated?
+    bool accepted = false;                             // Has been accepted?
+
+    int closeFlags = 0;                                // Flags for ledger close
+    NetClock::duration closeTimeResolution = {};       // Close time resolution (2-120s)
+    NetClock::time_point closeTime = {};               // When this ledger closed
 };
 ```
 
+**Key Header Fields:**
+
+| Field | Purpose |
+|-------|---------|
+| `seq` | Ledger sequence number, incrementing from genesis |
+| `parentHash` | Cryptographic link to previous ledger |
+| `accountHash` | Root hash of state tree (from `stateMap_.getHash()`) |
+| `txHash` | Root hash of transaction tree (from `txMap_.getHash()`) |
+| `drops` | Total XRP in existence (decreases as fees are burned) |
+| `closeTime` | When this ledger closed (consensus-agreed time) |
+| `parentCloseTime` | Parent ledger's close time |
+| `closeTimeResolution` | Granularity of close time (2-120 seconds) |
+| `closeFlags` | Indicates if close time had consensus |
+| `validated` | Set to true once ledger receives quorum validations |
+
 **Header Hashing:**
 
-The ledger hash is computed from the serialized header:
+The ledger hash uniquely identifies the ledger and is computed by serializing and hashing the header fields:
 
-```
+```cpp
+// From calculateLedgerHash() - conceptual representation
 Ledger Hash = SHA512Half(
+    HashPrefix::ledgerMaster ||  // Prefix for ledger headers
     seq ||
     drops ||
     parentHash ||
@@ -157,38 +222,58 @@ Ledger Hash = SHA512Half(
 )
 ```
 
-This creates a unique fingerprint for the entire ledger state.
+This creates a unique, tamper-evident fingerprint for the entire ledger state. Any change to the state tree, transaction tree, or metadata produces a different hash.
+
+**Note:** The "ledger base" refers to a query/response that includes the ledger header and may also contain the root node of the state tree. This is used during ledger acquisition from peers.
 
 ### LedgerHolder
 
-Thread-safe container for immutable ledger references:
+A thread-safe container that holds an immutable ledger. **Only immutable ledgers can be held** - this is enforced at runtime.
+
+**Location:** [LedgerHolder.h](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/app/ledger/LedgerHolder.h)
 
 ```cpp
-// LedgerHolder.h
-class LedgerHolder {
-    std::mutex mutex_;
-    std::shared_ptr<Ledger const> ledger_;
-
+// LedgerHolder.h (actual source code)
+class LedgerHolder : public CountedObject<LedgerHolder>
+{
 public:
-    // Set requires immutable ledger
-    void set(std::shared_ptr<Ledger const> ledger) {
-        assert(ledger->isImmutable());
-        std::lock_guard lock(mutex_);
-        ledger_ = std::move(ledger);
+    // Update the held ledger (MUST be immutable!)
+    void set(std::shared_ptr<Ledger const> ledger)
+    {
+        if (!ledger)
+            LogicError("LedgerHolder::set with nullptr");
+        if (!ledger->isImmutable())  // Runtime check!
+            LogicError("LedgerHolder::set with mutable Ledger");
+
+        std::lock_guard sl(m_lock);
+        m_heldLedger = std::move(ledger);
     }
 
-    // Get returns shared pointer
-    std::shared_ptr<Ledger const> get() const {
-        std::lock_guard lock(mutex_);
-        return ledger_;
+    // Return the (immutable) held ledger
+    std::shared_ptr<Ledger const> get()
+    {
+        std::lock_guard sl(m_lock);
+        return m_heldLedger;
     }
 
-    bool empty() const {
-        std::lock_guard lock(mutex_);
-        return !ledger_;
+    // Check if a ledger is held
+    bool empty()
+    {
+        std::lock_guard sl(m_lock);
+        return m_heldLedger == nullptr;
     }
+
+private:
+    std::mutex m_lock;
+    std::shared_ptr<Ledger const> m_heldLedger;
 };
 ```
+
+**Why immutability matters:**
+
+- Multiple threads can safely read from an immutable ledger without locks
+- Once set, the ledger's state never changes, preventing race conditions
+- LedgerMaster uses LedgerHolders to track `mValidLedger`, `mClosedLedger`, etc.
 
 **Usage Pattern:**
 
@@ -203,7 +288,8 @@ public:
 │   ┌──────────────┐    ┌────────────────┐    ┌───────────┐   │
 │   │   Thread 2   │───►│  LedgerHolder  │───►│  Ledger   │   │
 │   └──────────────┘    │   (mutex)      │    │ (const)   │   │
-│                         ▲               └───────────┘   │
+│                       └────────────────┘    └───────────┘   │
+│                         ▲                                   │
 │   ┌──────────────┐      │                                   │
 │   │   Thread 3   │──────┘                                   │
 │   └──────────────┘                                          │
@@ -216,10 +302,12 @@ public:
 
 ### LedgerHistory
 
-Manages the cache and retrieval of historical ledgers:
+Manages the cache and retrieval of historical ledgers.
+
+**Location:** [LedgerHistory.h](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/app/ledger/LedgerHistory.h), [LedgerHistory.cpp](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/app/ledger/LedgerHistory.cpp)
 
 ```cpp
-// LedgerHistory.h
+// LedgerHistory.h (simplified from actual source)
 class LedgerHistory {
     // Cache: hash → ledger
     TaggedCache<uint256, Ledger const> m_ledgers_by_hash;
@@ -279,45 +367,82 @@ public:
 └─────────────────────────────────────────────────────────────┘
 ```
 
+**Key Operations:**
+
+The `insert()` method (from LedgerHistory.cpp) adds ledgers to both caches and ensures the index-to-hash mapping is correct. The `fixIndex()` method is used to correct any inconsistencies in the index mapping that may occur during acquisition.
+
 ### Immutability Enforcement
 
-The system strictly enforces ledger immutability:
+**Once a ledger is finalized, it can never be changed.** This is enforced both at compile time (via `const` correctness) and runtime (via the `mImmutable` flag).
 
 ```cpp
-class Ledger {
-    bool mImmutable = false;
-
-    void setImmutable() {
-        // Mark ledger as immutable
-        mImmutable = true;
-
-        // Mark SHAMaps as immutable
-        stateMap_.setImmutable();
-        txMap_.setImmutable();
-
-        // Calculate and cache hash
-        info_.hash = calculateHash();
+void Ledger::setImmutable(bool rehash)
+{
+    // Force update of SHAMap root hashes
+    if (!mImmutable && rehash)
+    {
+        // Get final root hashes from SHAMaps
+        header_.txHash = txMap_.getHash().as_uint256();
+        header_.accountHash = stateMap_.getHash().as_uint256();
     }
 
-    bool isImmutable() const {
-        return mImmutable;
-    }
-};
+    // Calculate final ledger hash from header
+    if (rehash)
+        header_.hash = calculateLedgerHash(header_);
+
+    // Lock down everything - no more modifications allowed
+    mImmutable = true;
+    txMap_.setImmutable();    // SHAMap becomes read-only
+    stateMap_.setImmutable(); // SHAMap becomes read-only
+
+    // Validate fee object exists (unless very early ledger)
+    setup();
+}
+```
+
+**Immutability Lifecycle:**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ LEDGER MUTABILITY LIFECYCLE                                 │
+│                                                             │
+│  1. Construction → MUTABLE                                  │
+│     • Ledger(prevLedger, closeTime)                         │
+│     • Can modify state, add transactions                    │
+│     • NOT safe for concurrent access                        │
+│                                                             │
+│  2. Build & Consensus → STILL MUTABLE                       │
+│     • Apply transactions to state                           │
+│     • Flush dirty SHAMap nodes to database                  │
+│     • Calculate final hashes                                │
+│                                                             │
+│  3. setImmutable() called → IMMUTABLE                       │
+│     • Header hashes locked in                               │
+│     • SHAMaps become read-only                              │
+│     • Safe for concurrent reads                             │
+│     • Can be stored in LedgerHolder                         │
+│                                                             │
+│  4. Validation → VALIDATED                                  │
+│     • header_.validated = true                              │
+│     • Received quorum of trusted validations                │
+│     • Now part of canonical ledger history                  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 **Immutability Rules:**
 
 | Operation | Mutable Ledger | Immutable Ledger |
 | --- | --- | --- |
-| Modify state | Allowed | Forbidden |
-| Add transactions | Allowed | Forbidden |
-| Store in LedgerHolder | Forbidden | Allowed |
-| Publish to network | Forbidden | Required |
-| Cache in LedgerHistory | Forbidden | Allowed |
+| Modify state (`rawInsert`, `rawReplace`) | ✅ Allowed | ❌ Forbidden |
+| Add transactions | ✅ Allowed | ❌ Forbidden |
+| Store in `LedgerHolder` | ❌ Runtime error | ✅ Required |
+| Publish to network | ❌ Forbidden | ✅ Required |
+| Cache in `LedgerHistory` | ❌ Not typical | ✅ Allowed |
+| Read operations (`read`, `peek`) | ✅ Allowed | ✅ Allowed |
 
 ### SHAMap Integration
 
-Ledgers use SHAMaps for state and transaction storage:
+Ledgers use SHAMaps for state and transaction storage. The SHAMap is a Merkle-Patricia trie covered in detail in later modules. Here we focus on how the Ledger class interacts with it:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -353,121 +478,183 @@ Ledgers use SHAMaps for state and transaction storage:
 └─────────────────────────────────────────────────────────────┘
 ```
 
+When `setImmutable(true)` is called, the final root hashes are retrieved from the SHAMaps and stored in the LedgerHeader.
+
 ### The Rules Class
 
-Manages protocol rules and amendments:
+The `Rules` class encapsulates which amendments (protocol upgrades) are enabled for a specific ledger. **All nodes must agree on which amendments are active for deterministic transaction processing.**
+
+**Location:** [Rules.h](https://github.com/XRPLF/rippled/blob/develop/include/xrpl/protocol/Rules.h)
 
 ```cpp
-class Rules {
-    // Set of enabled amendments
-    std::set<uint256> enabledAmendments_;
+// Rules.h (actual source code - uses pimpl idiom)
+class Rules
+{
+private:
+    class Impl;  // Implementation hidden in .cpp file
 
-    // Precomputed feature flags
-    bool featureEnabled_[MAX_FEATURES];
+    // Shared pointer makes Rules cheap to copy
+    std::shared_ptr<Impl const> impl_;
 
 public:
-    // Check if amendment is enabled
-    bool enabled(uint256 const& amendment) const {
-        return enabledAmendments_.count(amendment) > 0;
-    }
+    // Construct rules from a set of enabled amendment IDs
+    explicit Rules(std::unordered_set<uint256, beast::uhash<>> const& presets);
 
-    // Check precomputed feature
-    bool enabled(Feature f) const {
-        return featureEnabled_[static_cast<int>(f)];
-    }
+    // Check if a specific amendment is enabled
+    bool enabled(uint256 const& feature) const;
+
+    // Rules are cheap to copy due to shared_ptr
+    Rules(Rules const&) = default;
+    Rules& operator=(Rules const&) = default;
+
+    // Compare two rule sets
+    bool operator==(Rules const&) const;
 };
 ```
 
-**Amendment Impact:**
+**How Rules Are Used:**
 
-Rules determine how transactions are processed:
+Throughout transaction processing, the code checks if specific amendments are enabled to determine which logic path to use:
+
+```cpp
+// Example from payment processing
+if (view.rules().enabled(featureFlowCross))
+{
+    // Use new payment engine introduced by FlowCross amendment
+    return flowCross(view, deliver, account, src, dst, ...);
+}
+else
+{
+    // Use legacy payment engine
+    return legacyPaymentEngine(view, deliver, ...);
+}
+```
+
+**Amendment Activation:**
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                   RULES APPLICATION                         │
+│           AMENDMENT LIFECYCLE PER LEDGER                    │
 │                                                             │
-│   Transaction Processing:                                   │
+│  1. Amendment Proposed                                      │
+│     • Validators vote yes/no on amendments                  │
+│     • Votes recorded in validation messages                 │
 │                                                             │
-│   if (ledger.rules().enabled(featureXYZ)) {                │
-│       // Use new processing logic                           │
-│   } else {                                                  │
-│       // Use legacy processing logic                        │
-│   }                                                         │
+│  2. Amendment Gains Majority (80%+ for 2 weeks)             │
+│     • Flag ledger arrives (every 256 ledgers)               │
+│     • Amendment marked as "enabled"                         │
+│     • Rules object updated for next ledger                  │
 │                                                             │
-│   This ensures consistent behavior across all nodes         │
-│   regardless of when they joined the network.               │
+│  3. Rules Object Created for Each Ledger                    │
+│     • makeRulesGivenLedger() reads enabled amendments       │
+│     • Creates Rules object with that ledger's active set    │
+│     • All transaction processing uses these rules           │
+│                                                             │
+│  4. Deterministic Processing                                │
+│     • Same ledger + same rules = same result                │
+│     • Historical replays work correctly                     │
+│     • All validators reach identical state                  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
+**Why This Matters:**
+
+- **Consensus requires determinism**: All validators must process transactions identically
+- **Amendments change behavior**: Different amendment sets → different results
+- **Rules track the truth**: The `Rules` object for ledger N reflects exactly which amendments were active when ledger N was built
+
+See **Amendments** in Consensus II for full details on the amendment system.
+
 ### Key Operations
 
-**Reading Account State:**
+The Ledger class provides methods to read and modify state objects. All operations work through the `stateMap_` SHAMap.
+
+**Reading State:**
 
 ```cpp
-std::shared_ptr<SLE const> Ledger::read(Keylet const& k) const {
+// Ledger.cpp:414-431
+std::shared_ptr<SLE const> Ledger::read(Keylet const& k) const
+{
+    // 1. Look up item in state map
     auto const& item = stateMap_.peekItem(k.key);
     if (!item)
-        return nullptr;
+        return nullptr;  // Object doesn't exist
 
-    auto sle = std::make_shared<SLE>(
-        SerialIter{item->data(), item->size()}, k.key);
+    // 2. Deserialize to Serialized Ledger Entry (SLE)
+    auto sle = std::make_shared<SLE>(SerialIter{item->slice()}, item->key());
 
-    // Verify type matches keylet
-    if (sle->getType() != k.type)
+    // 3. Verify type matches expectation
+    if (!k.check(*sle))
         return nullptr;
 
     return sle;
 }
 ```
 
-**Modifying State (Mutable Ledger Only):**
+The `read()` method uses a `Keylet` for type-safe lookups. A Keylet combines a key with a type checker, ensuring you retrieve the correct object type (e.g., `keylet::account(accountID)` for account roots).
+
+**Modifying State (Mutable Ledgers Only):**
 
 ```cpp
-void Ledger::rawInsert(std::shared_ptr<SLE> const& sle) {
-    assert(!mImmutable);
+// Insert new object
+void rawInsert(std::shared_ptr<SLE> const& sle);
 
-    Serializer ss;
-    sle->add(ss);
+// Update existing object
+void rawReplace(std::shared_ptr<SLE> const& sle);
 
-    auto item = std::make_shared<SHAMapItem>(
-        sle->key(), std::move(ss.modData()));
-
-    stateMap_.addItem(SHAMapNodeType::tnACCOUNT_STATE, std::move(item));
-}
+// Delete object
+void rawErase(std::shared_ptr<SLE> const& sle);
 ```
+
+These methods:
+- Only work on mutable ledgers (before `setImmutable()` is called)
+- Serialize the SLE to binary format
+- Add/update/remove items in `stateMap_`
+- Throw `LogicError` if the operation fails (duplicate key, missing key, etc.)
 
 ### Database Persistence
 
-Ledgers are persisted through multiple mechanisms:
+Ledgers are stored using a two-tier system:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                  PERSISTENCE FLOW                           │
+│                  PERSISTENCE ARCHITECTURE                   │
 │                                                             │
 │   Ledger Object                                             │
 │       │                                                     │
-│       ├──► LedgerInfo → SQL Database (ledger metadata)      │
+│       ├──► LedgerHeader → SQL Database                      │
+│       │    • Sequence, hashes, close time                   │
+│       │    • Fast header lookups by seq or hash             │
 │       │                                                     │
-│       ├──► stateMap_ → NodeStore (state nodes)              │
-│       │                                                     │
-│       └──► txMap_ → NodeStore (transaction nodes)           │
-│                                                             │
-│   Retrieval:                                                │
-│       │                                                     │
-│       ├──► Load LedgerInfo from SQL                         │
-│       │                                                     │
-│       └──► Reconstruct SHAMaps from NodeStore               │
-│            (nodes loaded on-demand)                         │
+│       └──► stateMap_ & txMap_ → NodeStore                   │
+│            • Individual tree nodes stored by hash           │
+│            • Shared across ledgers (deduplication)          │
+│            • Lazy loading on access                         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Verification on Load:**
+**Why Two Storage Systems?**
+
+1. **SQL Database**: Stores ledger headers for fast sequential access and indexing
+2. **NodeStore**: Stores SHAMap tree nodes for efficient content-addressable storage
+
+When loading a ledger:
+1. Retrieve header from SQL database by sequence or hash
+2. Construct empty SHAMaps with root hashes from header
+3. Load tree nodes from NodeStore on-demand as they're accessed
+
+**Integrity Verification:**
+
+Before persisting, the system verifies hash consistency:
 
 ```cpp
-// Before saving, verify integrity
-assert(info_.accountHash == stateMap_.getHash());
-assert(info_.txHash == txMap_.getHash());
+assert(header_.accountHash == stateMap_.getHash().as_uint256());
+assert(header_.txHash == txMap_.getHash().as_uint256());
 ```
+
+This ensures the header accurately represents the tree contents. Mismatches indicate data corruption, Byzantine attacks, or implementation bugs.
+
+**Implementation:** See [Node.cpp](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/app/rdb/backend/detail/Node.cpp) and [SQLiteDatabase.cpp](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/app/rdb/backend/detail/SQLiteDatabase.cpp) for details.
 
 ### Summary
 
@@ -476,7 +663,7 @@ assert(info_.txHash == txMap_.getHash());
 | Structure | Purpose | Key Features |
 | --- | --- | --- |
 | Ledger | Single ledger instance | State + Tx maps, immutability |
-| LedgerInfo | Header metadata | Hashing, identification |
+| LedgerHeader | Header metadata | Hashing, identification |
 | LedgerHolder | Thread-safe container | Mutex protection, const enforcement |
 | LedgerHistory | Cache management | Hash/seq lookup, validation tracking |
 | Rules | Protocol configuration | Amendment checking |
@@ -495,5 +682,15 @@ assert(info_.txHash == txMap_.getHash());
 - Copy-on-write for efficient branching
 - Const correctness for immutability
 - Tagged caches for LRU eviction
+- Pimpl idiom for Rules (hides implementation details)
+
+**Source Code References:**
+
+- [Ledger.h](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/app/ledger/Ledger.h) - Ledger class definition
+- [Ledger.cpp](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/app/ledger/Ledger.cpp) - Ledger implementation
+- [LedgerHeader.h](https://github.com/XRPLF/rippled/blob/develop/include/xrpl/protocol/LedgerHeader.h) - LedgerHeader structure
+- [LedgerHolder.h](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/app/ledger/LedgerHolder.h) - Thread-safe holder
+- [LedgerHistory.h](https://github.com/XRPLF/rippled/blob/develop/src/xrpld/app/ledger/LedgerHistory.h) - History cache
+- [Rules.h](https://github.com/XRPLF/rippled/blob/develop/include/xrpl/protocol/Rules.h) - Amendment rules
 
 In the next chapter, we'll explore how ledgers are acquired from the network and validated.
