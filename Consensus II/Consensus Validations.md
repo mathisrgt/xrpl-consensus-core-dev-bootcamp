@@ -130,29 +130,47 @@ struct ValidationParms
 ### Parameter Explanations
 
 **validationCURRENT_WALL (5 minutes):**
-- Maximum wall-clock time a validation is considered "current" relative to network's global time
-- Validations older than this are considered stale and ignored for consensus
-- Prevents old validations from affecting current consensus rounds
+- Maximum time window around current time that a validation's **sign time** is acceptable
+- Based on validation's **sign time** vs. current network time
+- Formula: `signTime < (now + validationCURRENT_WALL)`
+- Protects against very old validations
+- Accounts for close time accuracy window adjustments
 
 **validationCURRENT_LOCAL (3 minutes):**
-- Maximum local time a validation is considered "current" relative to local node's clock
-- Helps mitigate local clock skew
-- Ensures local time drift doesn't cause validation rejection
+- Maximum time after we **first saw** a validation that it remains current
+- Based on local **observation time** (seenTime), not validator's sign time
+- Formula: `seenTime < (now + validationCURRENT_LOCAL)`
+- Provides faster recovery when network produces fewer validations than normal
+- Helps handle late-arriving but still useful validations
+- Prevents rejecting useful validations due to propagation delays
 
 **validationCURRENT_EARLY (3 minutes):**
-- Earliest time (before now) that a validation is accepted
-- Prevents nodes from submitting validations too far in advance
-- Protects against timestamp manipulation
+- Earliest acceptable sign time relative to current time
+- Formula: `signTime > (now - validationCURRENT_EARLY)`
+- Prevents accepting validations with timestamps too far in the past
+- Protects against extreme clock errors and timestamp manipulation
+- Ensures validation is reasonably recent
 
 **validationSET_EXPIRES (10 minutes):**
-- Duration after which a set of validations is considered expired
-- Allows purging old validations from memory
-- Prevents memory exhaustion from historical validations
+- Duration before validation sets for a specific ledger hash expire
+- Keeps recent ledger validations available for reasonable interval
+- Allows pruning old validations from memory
+- Prevents memory exhaustion from historical validation accumulation
+- Applied to both byLedger_ and bySequence_ data structures
 
 **validationFRESHNESS (20 seconds):**
-- Interval within which a validation is considered "fresh"
-- Used for scoring and Negative UNL purposes
-- Determines recent validator participation
+- Time window since validation was **seen** to consider validator "live"
+- Formula: `now < (seenTime + validationFRESHNESS)`
+- Used for validator participation scoring and Negative UNL decisions
+- Must be significantly > ledgerMAX_CONSENSUS (15s)
+- Prevents marking validators as offline when they're waiting for laggards
+- Measured from seenTime (when we observed it), not signTime
+
+**Critical Distinction:**
+- **signTime**: When the validator **signed** the validation (validator's timestamp)
+- **seenTime**: When **we first observed** the validation (local observation time)
+- Different parameters check different times for different purposes
+- This separation handles network delays and clock skew independently
 
 ### Why These Specific Timeframes?
 
@@ -497,83 +515,101 @@ enum class BypassAccept : bool { no = false, yes };
 
 ## Byzantine Behavior Detection
 
-### Byzantine Fault Types
+The validation system detects and rejects Byzantine behavior through multiple mechanisms:
 
-The validation system detects several types of malicious or faulty behavior:
+### 1. Sequence Violation Detection
 
-**Sequence Violations:**
-- Validators submitting out-of-order validations
-- Sequence numbers that regress or skip
-- Detected by `SeqEnforcer`
+**SeqEnforcer Class** (`Validations.h:73-107`)
 
-**Conflicting Validations:**
-- Multiple validations for same sequence with different ledger hashes
-- Indicates validator is attempting to fork the chain
-- Strong evidence of malicious behavior
+Enforces monotonically increasing sequence numbers per validator:
 
-**Timestamp Manipulation:**
-- Validations with invalid or suspicious timing
-- Outside acceptable time windows
-- Detected by timing parameter checks
+```cpp
+bool operator()(time_point now, Seq s, ValidationParms const& p)
+{
+    if (now > (when_ + p.validationSET_EXPIRES))
+        seq_ = Seq{0};  // Reset after expiration
+    if (s <= seq_)
+        return false;   // Reject non-increasing sequence
+    seq_ = s;
+    return true;
+}
+```
 
-**Invalid Signatures:**
-- Cryptographically invalid validation messages
-- Signature doesn't match public key
-- Indicates tampering or implementation bug
+**Detects:**
+- Sequence numbers that regress (older than previous)
+- Duplicate sequences from same validator
+- Returns `ValStatus::badSeq` on violation
 
-**Spam Attacks:**
-- Excessive validation submission to overwhelm network
-- Multiple duplicate validations
-- Detected by rate limiting and duplicate checks
+### 2. Conflicting Validation Detection
 
-### Detection Mechanisms
+**Code:** `Validations.h:600-640`
 
-**SeqEnforcer Monitoring:**
-- Tracks sequence number violations per validator
-- Provides clear evidence of sequence misbehavior
-- Per-validator tracking isolates bad actors
+Tracks multiple validations per sequence and detects conflicts:
 
-**Signature Verification:**
-- Cryptographic validation of all messages
-- Invalid signatures immediately rejected
-- No cost to network for invalid messages
+```cpp
+// If same sequence but different ledger hash → conflict
+if (seqit->second.ledgerID() != val.ledgerID())
+    return ValStatus::conflicting;
+```
 
-**Timing Analysis:**
-- Statistical analysis of validation timing patterns
-- Identifies validators with suspicious timing
-- Detects attempts to game the system
+**Detects:**
+- Validator proposing different ledgers for same sequence
+- Evidence of attempted chain fork
+- Strongest indicator of malicious behavior
 
-**Reputation Scoring:**
-- Historical behavior tracking for each validator
-- Used by Negative UNL for validator management
-- Gradual response to consistent misbehavior
+### 3. Timestamp Validation
 
-**Conflict Detection:**
-- Identifies multiple validations for same sequence
-- Distinguishes between duplicates and conflicts
-- Logs all evidence for analysis
+**isCurrent() Function** (`Validations.h:129-147`)
 
-### Why Byzantine Detection Matters
+Validates timing using three parameters:
 
-**Network Security:**
-- Prevents malicious validators from disrupting consensus
-- Early detection stops attacks before they succeed
-- Protects network integrity
+```cpp
+return (signTime > (now - p.validationCURRENT_EARLY)) &&
+       (signTime < (now + p.validationCURRENT_WALL)) &&
+       (seenTime < (now + p.validationCURRENT_LOCAL));
+```
 
-**Trust Maintenance:**
-- Identifies validators that should be removed from UNL
-- Provides evidence for operator decisions
-- Maintains validator quality
+**Detects:**
+- Sign times too far in past (>3 min before now)
+- Sign times too far in future (>5 min after now)
+- Observations too old (>3 min since first seen)
+- Returns `ValStatus::stale` on violation
 
-**Attack Prevention:**
-- Deters attacks by detecting and publicizing them
-- Makes attacks costly and ineffective
-- Protects network from various attack vectors
+### 4. Signature Verification
 
-**System Integrity:**
-- Maintains reliability of consensus process
-- Ensures only honest validators influence outcome
-- Preserves network decentralization
+**Built into validation processing** (before reaching Validations class)
+
+**Detects:**
+- Invalid cryptographic signatures
+- Signature doesn't match claimed validator key
+- Rejected immediately at protocol layer
+
+### 5. Duplicate Detection
+
+**Code:** `Validations.h:640-650`
+
+Prevents same validation from being processed multiple times:
+
+```cpp
+if (byLedger_.find(val.ledgerID()) != byLedger_.end())
+{
+    if (existing validation found)
+        return ValStatus::multiple;
+}
+```
+
+**Detects:**
+- Duplicate submissions of identical validation
+- Spam/DOS attempts
+- Returns `ValStatus::multiple`
+
+### Byzantine Response Chain
+
+1. **Immediate Rejection:** Invalid validations never stored or propagated
+2. **Status Reporting:** `ValStatus` enum provides rejection reason
+3. **Logging:** All rejections logged for operator analysis
+4. **Negative UNL Integration:** Persistent misbehavior tracked via `validationFRESHNESS`
+5. **Operator Action:** UNL managers can remove consistently Byzantine validators
 
 ### Response Strategies
 
