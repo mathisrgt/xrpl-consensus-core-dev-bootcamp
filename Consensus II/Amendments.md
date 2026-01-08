@@ -2,8 +2,6 @@
 
 [← Back to Consensus and Ledger Architecture](https://docs.xrpl-commons.org/core-dev-bootcamp/module08)
 
-***
-
 ## Introduction
 
 Amendments are XRPL's democratic governance system for protocol evolution. They enable the network to evolve and improve while maintaining consensus and decentralization—allowing protocol changes to be coordinated across thousands of nodes without a central authority.
@@ -47,8 +45,6 @@ Amendments are XRPL's democratic governance system for protocol evolution. They 
 - Ensures network-wide consensus before activation
 - Maintains decentralization while enabling evolution
 - Transparent and auditable process
-
-***
 
 ## Amendment Lifecycle
 
@@ -257,8 +253,6 @@ C4483A1896170C66C098DEA5B0E024309C60DC960DE5F01CD7AF986AA3D9AD37
 - Bug fixes and security improvements
 - Better network performance
 
-***
-
 ## Amendment Architecture
 
 ### AmendmentTable Interface
@@ -342,8 +336,6 @@ struct AmendmentState {
 - `down` - Veto this amendment
 - `obsolete` - Amendment is obsolete, don't vote
 
-***
-
 ## Amendment Registration
 
 ### Supported, Obsolete, and Retired Amendments
@@ -414,8 +406,6 @@ XRPL_RETIRE(RetiredFeature)
    - Document behavior changes
    - Provide migration guidance
 
-***
-
 ## Voting Process
 
 ### Vote Collection and Aggregation
@@ -431,6 +421,44 @@ XRPL_RETIRE(RetiredFeature)
 - Aggregates votes per amendment
 
 **Location:** `rippled/src/xrpld/app/misc/detail/AmendmentTable.cpp`
+
+**Vote Caching and 24-Hour Timeout:**
+
+**Why Cache Votes?**
+- Prevents "flapping" during temporary validator disconnections
+- If a validator loses synchronization near a flag ledger, their votes might be missed
+- Without caching, amendments could repeatedly gain/lose support during network issues
+
+**How It Works:**
+
+**When a validator sends a validation with amendment votes:**
+1. Their votes are recorded in the cache
+2. A timeout is set: `currentTime + 24 hours`
+3. These cached votes are used for subsequent vote counting
+
+**When 24 hours pass without hearing from a validator:**
+1. Their cached votes **expire**
+2. Votes are **cleared** (set to empty)
+3. The validator is effectively counted as voting "No" on all amendments
+4. This prevents stale votes from influencing decisions indefinitely
+
+**Code Reference (AmendmentTable.cpp:153):**
+```cpp
+static constexpr NetClock::duration expiresAfter = 24h;
+```
+
+**Why 24 Hours?**
+- Balances responsiveness with stability
+- Allows for brief outages without changing vote record
+- Long enough to avoid flapping from short disconnections
+- Short enough to reflect actual validator intent
+- After 24h of silence, reasonable to assume position may have changed
+
+**Practical Impact:**
+- Validators must **actively maintain** their votes by sending regular validations
+- Offline validators don't indefinitely count toward amendment support
+- Encourages validator uptime and participation
+- Default state is effectively "No" - validators must continuously signal "Yes"
 
 ### AmendmentSet Class
 
@@ -481,12 +509,27 @@ bool passes(uint256 const& amendment) const {
 }
 ```
 
-### Ledger Integration: Voting Ledgers
+### Ledger Integration: Flag Ledgers
 
-**Every 256 Ledgers:**
-- Regular voting opportunities
-- Predictable schedule
+**Every 256 Ledgers (~15 minutes):**
+- Regular voting opportunities called "flag ledgers"
+- Predictable schedule: ledgers 256, 512, 768, 1024, etc.
 - `FLAG_LEDGER_INTERVAL = 256`
+- Votes are **counted** and decisions are **made** only at these checkpoints
+
+**Why Flag Ledgers?**
+- Reduces computational overhead (not counting every ledger)
+- Provides predictable voting schedule
+- Allows time for vote dissemination across network
+- Synchronized decision-making across all nodes
+
+**Relationship with 24-Hour Timeout:**
+- **Flag ledgers** determine **when** votes are counted (every ~15 minutes)
+- **24-hour timeout** determines **which** votes are valid (recent validators only)
+- Both mechanisms work together:
+  - At each flag ledger: count votes from validators heard from in last 24h
+  - Expired votes (>24h old) are not included in the count
+  - This ensures only active, participating validators influence decisions
 
 **Embedded in Consensus:**
 - Voting part of normal ledger creation
@@ -502,8 +545,6 @@ bool passes(uint256 const& amendment) const {
 - Amendments and transactions coexist
 - Voting doesn't interfere with operations
 - Consistent timing across network
-
-***
 
 ## Consensus Integration
 
@@ -569,8 +610,6 @@ bool passes(uint256 const& amendment) const {
 - Calls `doValidation` with empty set
 - Returns all amendments node wants enabled
 - Used for status queries
-
-***
 
 ## Ledger Application and Activation
 
@@ -647,8 +686,6 @@ if (amendment == fixTrustLinesToSelf)
 
 Some amendments require special activation logic for data migration or state updates.
 
-***
-
 ## Persistence and Database
 
 ### Storing Vote Preferences
@@ -702,8 +739,6 @@ WHERE rn = 1
 - Invoke callback for each row
 - Caller validates and updates internal state
 - Restores preferences across restarts
-
-***
 
 ## RPC and Admin Interface
 
@@ -770,8 +805,6 @@ WHERE rn = 1
 - Modifies node's voting preferences
 - Persisted to database
 - Takes effect immediately
-
-***
 
 ## Operational Consequences
 
@@ -848,8 +881,6 @@ This server is amendment blocked.
 - Amendments designed inclusively
 - Address concerns proactively
 - Build consensus before proposing
-
-***
 
 ## Edge Cases and Special Scenarios
 
@@ -930,8 +961,6 @@ B2A4DB846F0891BF2C76AB2F2ACC8F5B4EC64437135C6E56F3F859DE5FFD5856
 - Development and debugging
 - Isolated testing environments
 
-***
-
 ## Interactions with Other Systems
 
 ### Negative UNL Integration
@@ -974,8 +1003,6 @@ B2A4DB846F0891BF2C76AB2F2ACC8F5B4EC64437135C6E56F3F859DE5FFD5856
 - Median or majority vote
 - Economic impact considerations
 
-***
-
 ## Summary
 
 ### Key Takeaways
@@ -987,6 +1014,24 @@ B2A4DB846F0891BF2C76AB2F2ACC8F5B4EC64437135C6E56F3F859DE5FFD5856
 - **Veto power** protects significant minorities from unwanted changes
 - **Amendment blocking** protects network from unsupported activations
 - **Coordinated activation** ensures network-wide consensus
+
+### Critical Timeframes
+
+Understanding the different time periods is essential:
+
+| Timeframe | Purpose | What Happens |
+|-----------|---------|--------------|
+| **Every 256 ledgers (~15 min)** | Flag ledgers | Votes are counted and amendment status is evaluated |
+| **24 hours** | Vote cache timeout | If validator doesn't send validations for 24h, their cached votes expire → counted as "No" |
+| **2 weeks (configurable)** | Majority hold period | Amendment must maintain ≥80% support for this duration before activation |
+
+**Why votes "reset to No":**
+- NOT because of monthly cycles
+- NOT because of flag ledgers
+- **BECAUSE** validators must actively signal support every 24 hours
+- If a validator is offline/silent for 24h, their vote cache expires
+- Expired cache = no votes = effectively voting "No" on all amendments
+- This ensures only **active, participating** validators influence decisions
 
 ### The Big Picture
 
@@ -1000,8 +1045,6 @@ The amendment system demonstrates how distributed networks can evolve and improv
 - **Flexibility** allowing protocol to adapt to new requirements
 
 This sophisticated governance mechanism is fundamental to XRPL's ability to remain competitive and relevant while maintaining its core principles of decentralization, reliability, and security.
-
-***
 
 ## References to Source Code
 

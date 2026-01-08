@@ -2,9 +2,9 @@
 
 [← Back to Consensus and Ledger Architecture](https://docs.xrpl-commons.org/core-dev-bootcamp/module08)
 
-***
-
 ## Introduction
+
+> **📚 Prerequisites:** This document assumes familiarity with the consensus lifecycle. If you haven't yet, please review [Consensus Lifecycle](../Consensus%20I%20-%20Lifecycle%20and%20Ledger/Consensus%20Lifecycle.md) first to understand the Open, Establish, and Accept phases, dispute resolution, and the avalanche mechanism.
 
 Transaction ordering is a critical component of XRPL's Byzantine Fault Tolerant consensus mechanism. It ensures all validators agree on the exact order of transactions within each ledger, maintaining consistency, fairness, and predictability across the network.
 
@@ -17,6 +17,11 @@ Transaction ordering is a critical component of XRPL's Byzantine Fault Tolerant 
 - Guarantees identical transaction ordering across all honest validators
 - Prevents manipulation of transaction execution order
 - Enables deterministic ledger state transitions
+
+**Relationship to Consensus:**
+- **Consensus mechanism** determines WHICH transactions to include (set membership)
+- **Ordering mechanism** determines HOW to sequence included transactions (execution order)
+- Both work together to achieve BFT agreement on final ledger state
 
 ### Why Transaction Ordering Matters
 
@@ -62,8 +67,6 @@ Transaction ordering is a critical component of XRPL's Byzantine Fault Tolerant 
 - Processing thousands of transactions per second
 - Minimizing consensus round duration
 
-***
-
 ## Canonical Transaction Ordering
 
 ### The CanonicalTXSet Class
@@ -93,11 +96,70 @@ uint256 CanonicalTXSet::accountKey(AccountID const& account)
 }
 ```
 
-**How It Works:**
-- Account ID is XORed with a random salt value
-- Salt is derived from ledger-specific data (e.g., parent ledger hash)
-- Same salt used by all validators for deterministic results
-- Different salt for each ledger prevents ordering predictability
+**How Salt is Generated:**
+
+**Why Salting is Necessary:**
+The salt ensures that all honest validators produce **identical** transaction ordering (Byzantine Fault Tolerance) while making the ordering **unpredictable** to prevent gaming. The salt must be:
+1. **Deterministic** - All validators must compute the same salt
+2. **Agreed-upon** - Derived from data already established by consensus
+3. **Unpredictable** - Changes every ledger to prevent strategic ordering manipulation
+4. **Fair** - No account can consistently get priority across ledgers
+
+To achieve these properties, the salt is derived from **consensus-agreed data** - specifically, hashes that all validators already agreed upon in previous rounds.
+
+**Two Contexts Where Salted Ordering is Used:**
+
+**Context 1: TxQ (Transaction Queue Ordering)**
+
+**Purpose:** Orders transactions in the queue for **selection** into proposed transaction sets
+
+**Salt Source:** Hash of the **parent (previous) ledger**
+
+**Location:** `rippled/src/xrpld/app/misc/detail/TxQ.cpp:1551`
+```cpp
+LedgerHash const& parentHash = view.header().parentHash;
+MaybeTx::parentHashComp = parentHash;  // Salt set to parent ledger hash
+```
+
+**How it works:**
+- When building ledger N, salt = hash of ledger N-1
+- Example: Building ledger #100 → salt = hash(ledger #99)
+- All validators agreed on ledger N-1 in the previous consensus round
+- Therefore, all validators have the **same salt** for ledger N
+- Salt changes every ledger, preventing predictable ordering
+
+**Context 2: CanonicalTXSet (Retriable Transactions During Consensus)**
+
+**Purpose:** Orders transactions that **failed to apply** and can be retried in the next round
+
+**Salt Source:** Hash of the **transaction set itself** (SHAMap hash)
+
+**Location:** `rippled/src/xrpld/app/consensus/RCLConsensus.cpp:491`
+```cpp
+CanonicalTXSet retriableTxs{result.txns.map_->getHash().as_uint256()};
+```
+
+**How it works:**
+- Salt = hash of the agreed-upon transaction set
+- All validators reach consensus on the transaction set during the current round
+- Therefore, all validators compute the **same transaction set hash**
+- This hash becomes the salt for ordering retriable transactions
+- Salt changes per consensus round based on the agreed set
+
+**The BFT Guarantee:**
+
+Both salt sources derive from data that **all validators have already agreed upon through consensus**:
+
+| Salt Source | When Agreed | BFT Property |
+|-------------|-------------|--------------|
+| **Parent ledger hash** | Previous consensus round | Fixed and identical across all honest validators |
+| **Transaction set hash** | Current consensus round | Agreed upon during establish phase |
+
+**Result:**
+- All honest validators XOR the same salt with account IDs
+- All honest validators compute **identical salted keys**
+- All honest validators produce **identical ordering**
+- Byzantine validators **cannot** use different salt (would create different ordering → rejected by network)
 
 **Why Salting Matters:**
 
@@ -212,13 +274,11 @@ void CanonicalTXSet::insert(std::shared_ptr<STTx const> const& txn)
 - Transparent and auditable process
 - Reproducible results
 
-***
-
 ## Transaction Set Construction and Proposal
 
 ### Initial Transaction Collection
 
-**Sources of Transactions:**
+Validators collect transactions from multiple sources to build their proposed transaction sets:
 
 **Network Submissions:**
 - Transactions received from connected peers
@@ -268,10 +328,10 @@ void CanonicalTXSet::insert(std::shared_ptr<STTx const> const& txn)
    - Account for processing capacity
    - Ensure ledger can be built and validated in time
 
-6. **Fee Prioritization:**
-   - Higher fee transactions get preference
-   - Within ordering constraints
-   - Balance fairness with economic incentives
+6. **Fee Prioritization (TxQ only):**
+   - Higher fee transactions more likely to be selected from queue
+   - Affects inclusion in proposed set, NOT execution order within ledger
+   - Once in ledger, canonical ordering determines sequence
 
 7. **Account Limits:**
    - Enforce per-account transaction limits per ledger
@@ -283,307 +343,58 @@ void CanonicalTXSet::insert(std::shared_ptr<STTx const> const& txn)
    - Create proposal message
    - Sign with validator private key
 
-### Proposal Broadcasting
+## How Ordering Simplifies Consensus
 
-**Peer Distribution:**
-- Share proposed transaction set with other validators
-- Use overlay network for efficient propagation
-- Include transaction set hash in proposal message
+> **📚 Reference:** For consensus mechanics (dispute resolution, avalanche, thresholds), see [Consensus Lifecycle](../Consensus%20I%20-%20Lifecycle%20and%20Ledger/Consensus%20Lifecycle.md).
 
-**Compact Representation:**
-- Full transaction data not sent in every proposal
-- Transaction set hash used for compact reference
-- Peers can request full set if needed
+### Ordering Reduces Dispute Complexity
 
-**Timing Coordination:**
-- Align with consensus round timing requirements
-- Proposals sent early in establish phase
-- Allow time for dispute resolution
+**The Core Benefit:** Canonical ordering separates the consensus problem into two independent concerns:
 
-**Redundancy Handling:**
-- Manage duplicate proposals from multiple sources
-- Use suppression IDs to prevent relay loops
-- Efficient handling of redundant data
+1. **What to include** (resolved by consensus voting)
+2. **How to order** (resolved by deterministic salt)
 
-***
+**Impact on Disputes:**
 
-## Consensus Process and Dispute Management
+| Metric | Without Canonical Ordering | With Canonical Ordering |
+|--------|---------------------------|------------------------|
+| **Dispute Types** | Inclusion + Sequence | Inclusion only |
+| **Complexity** | O(N²) potential disputes | O(N) potential disputes |
+| **Comparison** | Compare sets AND orderings | Compare sets only |
+| **Resolution** | Must agree on both | Ordering automatic from salt |
 
-### DisputedTx Lifecycle
+**Code Reference:** `Consensus::createDisputes()` at `rippled/src/xrpld/consensus/Consensus.h:1801-1868`
 
-**Location:** `rippled/src/xrpld/consensus/DisputedTx.h`
-
-Disputes arise when validators propose different transaction sets. The `DisputedTx` class tracks and resolves these differences.
-
-#### Identification Phase: Creation
-
-**When Disputes Are Created:**
-- During proposal comparison between validators
-- When a transaction appears in some proposals but not others
-- Handled by `Consensus::createDisputes()`
-
-**Process:**
-
-1. Compare local transaction set with peer proposals
-2. Identify transactions in local set but not peer's set (or vice versa)
-3. Create `DisputedTx` object for each difference
-4. Initialize voting tracking for dispute
-
-**Data Tracked:**
-- Transaction being disputed
-- Votes "yes" (include) from each peer
-- Votes "no" (exclude) from each peer
-- Current vote counts
-- Dispute creation time
-
-#### Evaluation Phase: Voting
-
-**Voting Mechanism:**
-
-Each validator votes on whether to include or exclude the disputed transaction:
-
-**setVote() Method:**
 ```cpp
-void setVote(NodeID_t const& peer, bool votesYes)
-{
-    if (votesYes)
-        ++yays_;
-    else
-        ++nays_;
-    votes_[peer] = votesYes;
+// Disputes created ONLY for set membership differences
+auto differences = result_->txns.compare(o);
+for (auto const& [txId, inThisSet] : differences) {
+    // Dispute: Is txId IN or OUT? (not WHERE in the sequence)
+    result_->disputes.emplace(txID, std::move(dtx));
 }
 ```
 
-**Vote Updating:**
-- As proposals arrive, votes are recorded
-- Each peer can vote yes or no
-- Votes can change during consensus round
-- Vote changes tracked to detect stalls
+### Automatic Ordering Agreement
 
-**Avalanche Mechanism:**
+Once validators agree on which transactions to include (set membership), ordering is automatically identical:
 
-The threshold for including a disputed transaction increases over time:
+```
+Same Transaction Set + Same Salt → Identical Ordering
 
-**updateVote() Method:**
-- Calculates current consensus percentage
-- Determines required threshold based on avalanche state
-- Compares peer votes to threshold
-- Updates local vote accordingly
+Example:
+Validators A & B both agree: {TX1, TX2, TX3}
+Salt (from previous ledger): 0xABCD...
 
-**Avalanche States:**
-- **init (0% time):** 50% agreement needed
-- **mid (50% time):** 65% agreement needed
-- **late (85% time):** 70% agreement needed
-- **stuck (200% time):** 95% agreement needed
-
-**Why Avalanche Works:**
-- Rising threshold forces convergence
-- Validators adjust votes to match majority
-- Eventually all validators agree
-- Provides deterministic resolution
-
-#### Resolution Phase: Consensus
-
-**Determining Inclusion:**
-
-A transaction is included in the final set if:
-1. It meets the avalanche threshold for the current time
-2. Sufficient validators vote "yes"
-3. No persistent disagreement exists
-
-**Stalled Disputes:**
-
-**stalled() Method:**
-- Determines if consensus on transaction has stalled
-- Occurs when votes are unequivocally above/below threshold
-- Either over 80% "yes" or under 20% "yes"
-- Prevents manipulation by minority
-
-**When Disputes Are Resolved:**
-- When consensus is reached on final transaction set
-- When avalanche mechanism forces agreement
-- When validators update positions to match majority
-
-#### Cleanup Phase
-
-**Dispute Removal:**
-- Resolved disputes removed from tracking
-- Memory freed for new disputes
-- Only active disputes maintained
-
-**Final Transaction Set:**
-- Built from agreed-upon transactions
-- All validators use identical set
-- Applied to ledger deterministically
-
-### Dispute Detection Mechanisms
-
-**Proposal Comparison:**
-- Identify transactions in some but not all proposals
-- Compare transaction set hashes
-- Request missing transactions if needed
-
-**Threshold Analysis:**
-- Determine if sufficient validator support exists
-- Calculate percentage of validators including transaction
-- Compare to required threshold
-
-**Validity Assessment:**
-- Re-evaluate transaction correctness
-- Check if transaction is still valid
-- Consider changed ledger state
-
-**Network Consensus:**
-- Gauge overall network agreement level
-- Track validator positions
-- Identify consensus direction
-
-### Resolution Strategies
-
-**Majority Rule:**
-- Include transactions supported by validator majority
-- Follow avalanche thresholds
-- Converge on most popular position
-
-**Conservative Approach:**
-- Exclude disputed transactions when uncertain
-- Prefer safety over liveness
-- Avoid controversial inclusions
-
-**Retry Mechanism:**
-- Allow disputed transactions to be reconsidered later
-- Return to transaction queue
-- Can be included in future ledger
-
-**Finality Assurance:**
-- Ensure decisions are binding and consistent
-- Once consensus reached, decision is final
-- All validators apply same set
-
-***
-
-## Consensus State Determination
-
-### checkConsensus: Parameters, Thresholds, Timeouts, and Return States
-
-**Location:** `rippled/src/xrpld/consensus/Consensus.cpp` (lines 157-251)
-
-**Purpose:** Determines the consensus state and whether agreement has been reached.
-
-### Parameters
-
-The function considers several inputs:
-
-**Current State:**
-- `prevProposers` - Number of proposers in previous round
-- `currentProposers` - Number of proposers in current round
-- `currentAgree` - Number of proposers agreeing with us
-- `currentFinished` - Number of proposers who moved on
-
-**Timing:**
-- `previousAgreeTime` - How long previous round took
-- `currentAgreeTime` - How long current round has taken so far
-
-**Configuration:**
-- `parms` - Consensus parameters (thresholds, timeouts)
-- `proposing` - Whether we are proposing (affects quorum calculation)
-- `stalled` - Whether all disputes are stalled
-
-### Consensus Thresholds
-
-**Supermajority Requirement:**
-- **minCONSENSUS_PCT:** 80% validator agreement needed
-- Ensures network safety against Byzantine validators
-- Provides buffer against network issues and partitions
-
-**Safety Margin:**
-- 20% tolerance for Byzantine or offline validators
-- Prevents minority from blocking consensus
-- Balances safety with liveness
-
-**Dynamic Timing:**
-- Minimum consensus time: `ledgerMIN_CONSENSUS` (1.95s)
-- Maximum consensus time: `ledgerMAX_CONSENSUS` (15s)
-- Abandonment timeout: `ledgerABANDON_CONSENSUS` (120s)
-
-### State Transition Logic
-
-**Agreement Assessment:**
-
-```cpp
-if (checkConsensusReached(
-        currentAgree,
-        currentProposers,
-        proposing,
-        parms.minCONSENSUS_PCT,
-        currentAgreeTime > parms.ledgerMAX_CONSENSUS,
-        stalled,
-        clog))
-{
-    return ConsensusState::Yes;
-}
+Result:
+Validator A: [TX2, TX1, TX3] ← Deterministic
+Validator B: [TX2, TX1, TX3] ← Identical!
 ```
 
-**Threshold Comparison:**
-- Calculate percentage: `(agreeing * 100) / total`
-- Compare to `minCONSENSUS_PCT` (80%)
-- Account for self if proposing
-
-**State Advancement:**
-- Move to accepted phase when thresholds met
-- Build final ledger
-- Notify application layer
-
-**Fallback Procedures:**
-- If consensus cannot be reached, may expire
-- Network may move on without full agreement
-- Handles timeout scenarios
-
-### Return States
-
-**ConsensusState::No:**
-- Consensus has not been reached yet
-- Continue voting and updating positions
-- Most common state during establish phase
-
-**ConsensusState::Yes:**
-- Consensus successfully reached
-- 80%+ agreement on transaction set
-- Or all disputes stalled at threshold
-
-**ConsensusState::MovedOn:**
-- 80% of validators moved on to next ledger
-- This node fell behind network
-- Must catch up
-
-**ConsensusState::Expired:**
-- Consensus process timed out
-- Exceeded `ledgerABANDON_CONSENSUS` (120s)
-- Fallback to best-effort ledger
-
-### Validator Participation Tracking
-
-**Active Validator Set:**
-- Identify currently participating validators
-- Count proposers in current round
-- Compare to previous round
-
-**Response Monitoring:**
-- Track validator proposal submissions
-- Monitor vote updates
-- Detect non-responsive validators
-
-**Weight Calculation:**
-- All trusted validators have equal weight
-- Non-trusted validators excluded from count
-- Negative UNL validators excluded
-
-**Timeout Handling:**
-- Validators who don't respond treated as non-participating
-- Don't count toward quorum
-- May be added to Negative UNL if consistent
-
-***
+**Why This Matters:**
+- Consensus only resolves **one dimension** (inclusion)
+- Ordering **automatically follows** from agreed salt
+- No additional rounds needed for sequencing
+- Faster convergence to final ledger state
 
 ## Transaction Queue (TxQ) Ordering
 
@@ -637,8 +448,9 @@ bool operator()(MaybeTx const& lhs, MaybeTx const& rhs) const {
 
 **Queue Depth Limits:**
 - Each account limited to `maximumTxnPerAccount` transactions in queue
+- **Default: 10 transactions per account** (configurable in `rippled.cfg`)
 - Prevents any account from monopolizing queue space
-- Default limit prevents abuse
+- Configurable per-node basis via `maximum_txn_per_account` setting
 
 **Fairness Mechanism:**
 - Ensures equitable access across all accounts
@@ -671,8 +483,6 @@ bool operator()(MaybeTx const& lhs, MaybeTx const& rhs) const {
 - When queue full, drop lowest fee transactions
 - Manage queue when demand exceeds capacity
 - Clear space for higher value transactions
-
-***
 
 ## Transaction Blockers and Retries
 
@@ -730,8 +540,10 @@ bool operator()(MaybeTx const& lhs, MaybeTx const& rhs) const {
 
 **Retry Limits:**
 - Each transaction has `retriesAllowed` count
+- **Default: 10 retries** per transaction (`MaybeTx::retriesAllowed = 10`)
 - Prevents infinite retry loops
-- Eventually drop failed transactions
+- After exhausting retries, transaction is dropped from queue
+- Account penalty flags may be set, reducing retries for other transactions from that account
 
 **Success Tracking:**
 - Monitor retry success rates
@@ -782,8 +594,6 @@ bool operator()(MaybeTx const& lhs, MaybeTx const& rhs) const {
 - Emergency modes for unusual conditions
 - Ensure continuous operation
 
-***
-
 ## Supporting Classes and Utilities
 
 ### RCLCxTx
@@ -820,32 +630,45 @@ bool operator()(MaybeTx const& lhs, MaybeTx const& rhs) const {
 - Sequence number
 - Signature
 
-***
-
 ## Summary
 
 ### Key Takeaways
 
 - **Canonical ordering** ensures deterministic transaction sequencing across all validators
-- **Salted account keys** prevent gaming of transaction order
-- **Avalanche mechanism** resolves disputes and forces convergence
-- **Fee-based prioritization** within canonical constraints enables market-driven inclusion
+- **Salted account keys** prevent gaming of transaction order and Byzantine manipulation
+- **Salt derived from previous ledger** forces all validators to use same ordering
+- **Reduces disputes from O(N²) to O(N)** by eliminating ordering disagreements
+- **Fee-based TxQ prioritization** determines inclusion likelihood, not execution order
 - **Per-account limits** and blockers maintain fairness and consistency
-- **Robust retry and recovery** mechanisms handle failures gracefully
+- **Separation of concerns:** Consensus decides "what", ordering decides "how"
+
+### The BFT Role of Transaction Ordering
+
+Transaction ordering is **critical to Byzantine Fault Tolerance** because:
+
+1. **Enables Determinism:** All honest validators with same transaction set produce identical ledgers
+2. **Prevents Byzantine Manipulation:** Byzantine validators forced to use agreed-upon salt
+3. **Simplifies Consensus:** Validators only dispute inclusion, not ordering (reduces complexity)
+4. **Guarantees Convergence:** Once 80% agree on set membership, ordering is automatic
+5. **Provides Fairness:** No validator can strategically manipulate execution sequence
+
+**Without canonical ordering:** Consensus would require agreement on both set membership AND sequence, making Byzantine-resistant consensus significantly more complex or impossible.
+
+**With canonical ordering:** Consensus focuses solely on transaction inclusion, with ordering following deterministically from the previous ledger hash that all validators already agreed upon.
 
 ### The Big Picture
 
-Transaction ordering in XRPL represents a sophisticated balance between fairness, efficiency, and determinism. By combining cryptographically-salted ordering, fee-based prioritization, and the avalanche consensus mechanism, the system achieves:
+Transaction ordering in XRPL represents a sophisticated balance between fairness, efficiency, and determinism. By combining cryptographically-salted ordering, fee-based prioritization, and separation from the consensus mechanism, the system achieves:
 
-- **Predictable ordering** that cannot be gamed
-- **Fast consensus** on transaction sets despite network asynchrony
+- **Predictable ordering** that cannot be gamed by users or Byzantine validators
+- **Fast consensus** on transaction sets without ordering disputes
 - **Fair treatment** for all accounts and users
-- **Robust handling** of disputes and failures
+- **Byzantine resistance** through deterministic, unpredictable ordering
 - **Efficient processing** of thousands of transactions per second
 
-This comprehensive ordering system is fundamental to XRPL's ability to provide fast, fair, and secure transaction processing at global scale.
+This comprehensive ordering system is fundamental to XRPL's ability to achieve Byzantine Fault Tolerant consensus at global scale.
 
-***
+> **📚 Note:** This document focuses on transaction ordering mechanics. For the complete consensus lifecycle, dispute resolution details, avalanche mechanism, and phase transitions, see [Consensus Lifecycle](../Consensus%20I%20-%20Lifecycle%20and%20Ledger/Consensus%20Lifecycle.md).
 
 ## References to Source Code
 
